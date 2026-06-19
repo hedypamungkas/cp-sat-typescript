@@ -329,6 +329,9 @@ export class CpModel {
     const endVar = this.newIntVar(endMin, endMax, `${name}_end`);
     const endExpr = LinearExpr.fromVar(endVar);
 
+    // Link end = start + size
+    this.add(startExpr.add(sizeExpr).eq(endExpr));
+
     const index = this._registry.getNextIndex();
     const v = new IntervalVarImpl(index, startExpr, sizeExpr, endExpr, name);
     this._registry.registerIntervalVar(v);
@@ -408,6 +411,9 @@ export class CpModel {
 
     const endVar = this.newIntVar(endMin, endMax, `${name}_end`);
     const endExpr = LinearExpr.fromVar(endVar);
+
+    // Link end = start + size
+    this.add(startExpr.add(sizeExpr).eq(endExpr));
 
     const index = this._registry.getNextIndex();
     const v = new IntervalVarImpl(index, startExpr, sizeExpr, endExpr, name, isPresent);

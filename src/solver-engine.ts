@@ -35,6 +35,16 @@ import {
 } from './constraints';
 import { CpModel } from './model';
 import { presolveModel, computeDerivedValue, DerivedVar } from './presolve';
+import {
+  propagateNoOverlap,
+  propagateNoOverlapDetectable,
+  propagateNoOverlapNotLast,
+  propagateNoOverlapEdgeFinding,
+  propagateCumulativeTimeTable,
+  propagateCumulativeEdgeFinding,
+  PropagationResult,
+  LinearPropagateFn,
+} from './scheduling-propagation';
 
 // ============================================================================
 // Solver Statistics
@@ -1013,6 +1023,10 @@ export class SolverEngine {
         return this._propagateAbsEquality(constraint as AbsEqualityConstraint, domains);
       case 'ALLOWED_ASSIGNMENTS':
         return this._propagateAllowedAssignments(constraint as AllowedAssignmentsConstraint, domains);
+      case 'NO_OVERLAP':
+        return this._propagateNoOverlapConstraint(constraint as NoOverlapConstraint, domains);
+      case 'CUMULATIVE':
+        return this._propagateCumulativeConstraint(constraint as CumulativeConstraint, domains);
       default:
         return 'CONSISTENT';
     }
@@ -1034,7 +1048,8 @@ export class SolverEngine {
     for (let i = 0; i < vars.length; i++) {
       const v = vars[i];
       const c = coeffs[i];
-      const d = domains.get(v.index)!;
+      const d = domains.get(v.index);
+      if (!d || d.isEmpty) return 'INFEASIBLE';
 
       if (c > 0) {
         exprMin += c * d.min;
@@ -1056,7 +1071,8 @@ export class SolverEngine {
     for (let i = 0; i < vars.length; i++) {
       const v = vars[i];
       const c = coeffs[i];
-      const d = domains.get(v.index)!;
+      const d = domains.get(v.index);
+      if (!d || d.isEmpty) return 'INFEASIBLE';
 
       if (c === 0) continue;
 
@@ -1067,7 +1083,8 @@ export class SolverEngine {
         if (j === i) continue;
         const vj = vars[j];
         const cj = coeffs[j];
-        const dj = domains.get(vj.index)!;
+        const dj = domains.get(vj.index);
+        if (!dj || dj.isEmpty) return 'INFEASIBLE';
 
         if (cj > 0) {
           otherMin += cj * dj.min;
@@ -1670,6 +1687,76 @@ export class SolverEngine {
     }
 
     return changed ? 'CHANGED' : 'CONSISTENT';
+  }
+
+  // ============================================================================
+  // Scheduling Propagation
+  // ============================================================================
+
+  /**
+   * Adapter: delegate linear constraint propagation to _propagateLinear.
+   * Converts the simple (vars, coeffs, lb, ub) interface to a LinearConstraint.
+   */
+  private _propagateLinearCallback(
+    vars: IntVar[],
+    coeffs: number[],
+    lb: number,
+    ub: number,
+    domains: Map<number, Domain>
+  ): PropagationResult {
+    const bounds = new Domain([lb, ub]);
+    const ct = new LinearConstraint(-1, vars, coeffs, bounds);
+    return this._propagateLinear(ct, domains);
+  }
+
+  /**
+   * Orchestrate NoOverlap propagation: Simple Precedences → Detectable Precedences → Not-Last → Edge-Finding
+   */
+  private _propagateNoOverlapConstraint(
+    ct: NoOverlapConstraint,
+    domains: Map<number, Domain>
+  ): PropagationResult {
+    const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d) =>
+      this._propagateLinearCallback(vars, coeffs, lb, ub, d);
+
+    const result = propagateNoOverlap(ct, domains, linFn);
+    if (result === 'INFEASIBLE') return 'INFEASIBLE';
+
+    const result2 = propagateNoOverlapDetectable(ct, domains, linFn);
+    if (result2 === 'INFEASIBLE') return 'INFEASIBLE';
+
+    const result3 = propagateNoOverlapNotLast(ct, domains, linFn);
+    if (result3 === 'INFEASIBLE') return 'INFEASIBLE';
+
+    const result4 = propagateNoOverlapEdgeFinding(ct, domains, linFn);
+    if (result4 === 'INFEASIBLE') return 'INFEASIBLE';
+
+    if (result === 'CHANGED' || result2 === 'CHANGED' || result3 === 'CHANGED' || result4 === 'CHANGED') {
+      return 'CHANGED';
+    }
+    return 'CONSISTENT';
+  }
+
+  /**
+   * Orchestrate Cumulative propagation: Time-Table → Edge-Finding
+   */
+  private _propagateCumulativeConstraint(
+    ct: CumulativeConstraint,
+    domains: Map<number, Domain>
+  ): PropagationResult {
+    const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d) =>
+      this._propagateLinearCallback(vars, coeffs, lb, ub, d);
+
+    const result = propagateCumulativeTimeTable(ct, domains, linFn);
+    if (result === 'INFEASIBLE') return 'INFEASIBLE';
+
+    const result2 = propagateCumulativeEdgeFinding(ct, domains, linFn);
+    if (result2 === 'INFEASIBLE') return 'INFEASIBLE';
+
+    if (result === 'CHANGED' || result2 === 'CHANGED') {
+      return 'CHANGED';
+    }
+    return 'CONSISTENT';
   }
 
   // ============================================================================

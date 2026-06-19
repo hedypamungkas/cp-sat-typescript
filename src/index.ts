@@ -107,6 +107,24 @@ export { SolverEngine, SolverStats, SolutionCallback } from './solver-engine';
 export { presolveModel, compressDomains, detectAffineRelations, computeDerivedValue, PresolveResult, DerivedVar } from './presolve';
 
 // ============================================================================
+// Scheduling Propagation
+// ============================================================================
+
+export {
+  propagateNoOverlap,
+  propagateNoOverlapDetectable,
+  propagateNoOverlapNotLast,
+  propagateNoOverlapEdgeFinding,
+  propagateCumulativeTimeTable,
+  propagateCumulativeEdgeFinding,
+  computeIntervalBounds,
+  ThetaTree,
+  PropagationResult,
+  IntervalBounds,
+  LinearPropagateFn,
+} from './scheduling-propagation';
+
+// ============================================================================
 // Version
 // ============================================================================
 
