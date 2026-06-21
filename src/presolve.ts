@@ -22,6 +22,10 @@ import {
   MaxEqualityConstraint,
   MinEqualityConstraint,
   AllDifferentConstraint,
+  CircuitConstraint,
+  MultipleCircuitConstraint,
+  ReservoirConstraint,
+  NoOverlap2DConstraint,
 } from './constraints';
 
 // ============================================================================
@@ -85,6 +89,45 @@ function getConstraintVars(constraint: Constraint): IntVar[] {
     const vars: IntVar[] = [constraint.target];
     for (const expr of constraint.expressions) {
       vars.push(...expr.vars);
+    }
+    return vars;
+  }
+  if (constraint instanceof CircuitConstraint) {
+    const vars: IntVar[] = [];
+    for (const [_, __, lit] of constraint.arcs) {
+      vars.push(lit);
+    }
+    return vars;
+  }
+  if (constraint instanceof MultipleCircuitConstraint) {
+    const vars: IntVar[] = [];
+    for (const [_, __, lit] of constraint.arcs) {
+      vars.push(lit);
+    }
+    return vars;
+  }
+  if (constraint instanceof ReservoirConstraint) {
+    const vars: IntVar[] = [];
+    for (const expr of constraint.times) {
+      vars.push(...expr.vars);
+    }
+    for (const expr of constraint.levelChanges) {
+      vars.push(...expr.vars);
+    }
+    for (const lit of constraint.activeLiterals) {
+      if (lit) vars.push(lit);
+    }
+    return vars;
+  }
+  if (constraint instanceof NoOverlap2DConstraint) {
+    const vars: IntVar[] = [];
+    for (const iv of constraint.xIntervals) {
+      vars.push(...iv.start.vars, ...iv.size.vars, ...iv.end.vars);
+      if (iv.isPresent) vars.push(iv.isPresent);
+    }
+    for (const iv of constraint.yIntervals) {
+      vars.push(...iv.start.vars, ...iv.size.vars, ...iv.end.vars);
+      if (iv.isPresent) vars.push(iv.isPresent);
     }
     return vars;
   }
@@ -171,6 +214,8 @@ function propagateConstraint(
       return propagateMaxEquality(constraint as MaxEqualityConstraint, domains);
     case 'MIN_EQUALITY':
       return propagateMinEquality(constraint as MinEqualityConstraint, domains);
+    // case 'RESERVOIR':
+    //   return propagateReservoirPresolve(constraint as ReservoirConstraint, domains);
     default:
       return 'CONSISTENT';
   }
@@ -582,6 +627,74 @@ function propagateMinEquality(
   }
 
   return changed ? 'CHANGED' : 'CONSISTENT';
+}
+
+/**
+ * Presolve for Reservoir constraint: basic delta feasibility checks.
+ *
+ * For each event, check if its delta range is compatible with the level bounds.
+ * Also check if the sum of all possible positive deltas exceeds maxLevel.
+ */
+function propagateReservoirPresolve(
+  constraint: ReservoirConstraint,
+  domains: Map<number, Domain>
+): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
+  const n = constraint.times.length;
+  if (n === 0) return 'CONSISTENT';
+
+  // Helper to compute bounds of a LinearExpr
+  function getExprBounds(expr: LinearExpr): { min: number; max: number } | null {
+    let min = expr.offset;
+    let max = expr.offset;
+    for (let i = 0; i < expr.vars.length; i++) {
+      const d = domains.get(expr.vars[i].index);
+      if (!d || d.isEmpty) return null;
+      const c = expr.coeffs[i];
+      if (c > 0) {
+        min += c * d.min;
+        max += c * d.max;
+      } else if (c < 0) {
+        min += c * d.max;
+        max += c * d.min;
+      }
+    }
+    return { min, max };
+  }
+
+  // Only check definite (always-active) events for sum feasibility.
+  // "Maybe" events (active literal not fixed to 1) have other constraints
+  // (e.g., AtMostOne, ExactlyOne) that limit how many can fire simultaneously,
+  // so we can't just sum their deltas.
+  let defTotalPositive = 0;
+  let defTotalNegative = 0;
+
+  for (let i = 0; i < n; i++) {
+    // Only count events whose active literal is fixed to 1 (definitely active)
+    if (constraint.activeLiterals[i]) {
+      const d = domains.get(constraint.activeLiterals[i].index);
+      if (!d || d.size !== 1 || d.min !== 1) continue; // absent, maybe, or fixed to 0
+    }
+
+    const deltaBounds = getExprBounds(constraint.levelChanges[i]);
+    if (!deltaBounds) continue;
+
+    if (deltaBounds.max > 0) defTotalPositive += deltaBounds.max;
+    if (deltaBounds.min < 0) defTotalNegative += deltaBounds.min;
+  }
+
+  // Sum feasibility: if all definite positive events fire and no negative events,
+  // the level must not exceed maxLevel
+  if (defTotalPositive > constraint.maxLevel && defTotalNegative === 0) {
+    return 'INFEASIBLE';
+  }
+
+  // Sum feasibility: if all definite negative events fire and no positive events,
+  // the level must not drop below minLevel
+  if (defTotalNegative < constraint.minLevel && defTotalPositive === 0) {
+    return 'INFEASIBLE';
+  }
+
+  return 'CONSISTENT';
 }
 
 // ============================================================================

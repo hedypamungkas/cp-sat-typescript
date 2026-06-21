@@ -117,12 +117,34 @@ export {
   propagateNoOverlapEdgeFinding,
   propagateCumulativeTimeTable,
   propagateCumulativeEdgeFinding,
+  propagateReservoir,
+  checkReservoir,
   computeIntervalBounds,
   ThetaTree,
   PropagationResult,
   IntervalBounds,
   LinearPropagateFn,
 } from './scheduling-propagation';
+
+// ============================================================================
+// Circuit Propagation
+// ============================================================================
+
+export {
+  propagateCircuit,
+  propagateMultipleCircuit,
+  checkCircuit,
+  checkMultipleCircuit,
+} from './circuit-propagation';
+
+// ============================================================================
+// NoOverlap2D Propagation
+// ============================================================================
+
+export {
+  propagateNoOverlap2D,
+  checkNoOverlap2D,
+} from './nooverlap2d-propagation';
 
 // ============================================================================
 // Version

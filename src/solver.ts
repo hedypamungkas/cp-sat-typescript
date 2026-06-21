@@ -90,7 +90,7 @@ export class CpSolver {
    */
   solve(model: CpModel, callback?: CpSolverSolutionCallback): CpSolverStatus {
     // Create solver engine
-    this._engine = new SolverEngine(model);
+    this._engine = new SolverEngine(model, this._parameters);
 
     // Apply parameters
     if (this._parameters.maxTimeInSeconds) {

@@ -779,6 +779,8 @@ export interface SolverParameters {
   linearizationLevel?: number;
   /** Symmetry level */
   symmetryLevel?: number;
+  /** Disable propagation for specific constraint types (for benchmarking) */
+  disablePropagationForTypes?: string[];
 }
 
 // ============================================================================

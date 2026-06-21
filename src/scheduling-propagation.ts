@@ -11,8 +11,8 @@
  * - Carlier & Pinson (1994), Baptiste et al. (2001), Vilim (2011)
  */
 
-import { Domain, LinearExpr, IntVar, IntervalVar } from './types';
-import { NoOverlapConstraint, CumulativeConstraint } from './constraints';
+import { Domain, LinearExpr, IntVar, IntervalVar, BoolVar } from './types';
+import { NoOverlapConstraint, CumulativeConstraint, ReservoirConstraint } from './constraints';
 
 // ============================================================================
 // Types
@@ -875,4 +875,367 @@ export function propagateCumulativeEdgeFinding(
   }
 
   return changed ? 'CHANGED' : 'CONSISTENT';
+}
+
+// ============================================================================
+// Reservoir Constraint Propagation
+// ============================================================================
+
+/**
+ * Reservoir constraint: maintains a resource level over time.
+ *
+ * At every time point t, the reservoir level L(t) must satisfy:
+ *   minLevel <= L(t) <= maxLevel
+ *
+ * where L(t) = sum of levelChanges for all active events with time <= t.
+ *
+ * Propagation uses forward/backward sweep to tighten time domains and
+ * active literals based on level bounds.
+ */
+export function propagateReservoir(
+  ct: ReservoirConstraint,
+  domains: Map<number, Domain>,
+  propagateLinear: LinearPropagateFn
+): PropagationResult {
+  const n = ct.times.length;
+  if (n === 0) return 'CONSISTENT';
+
+  // Extract bounds for all events
+  interface EventBounds {
+    index: number;
+    timeMin: number;
+    timeMax: number;
+    deltaMin: number;
+    deltaMax: number;
+    activeState: 'present' | 'absent' | 'maybe';
+  }
+
+  const events: EventBounds[] = [];
+  for (let i = 0; i < n; i++) {
+    const timeBounds = getExprBounds(ct.times[i], domains);
+    if (!timeBounds) return 'CONSISTENT';
+    const deltaBounds = getExprBounds(ct.levelChanges[i], domains);
+    if (!deltaBounds) return 'CONSISTENT';
+
+    let activeState: 'present' | 'absent' | 'maybe' = 'present';
+    if (ct.activeLiterals[i]) {
+      const d = domains.get(ct.activeLiterals[i].index);
+      if (d) {
+        if (d.size === 1) {
+          activeState = d.min === 1 ? 'present' : 'absent';
+        } else {
+          activeState = 'maybe';
+        }
+      }
+    }
+
+    events.push({
+      index: i,
+      timeMin: timeBounds.min,
+      timeMax: timeBounds.max,
+      deltaMin: deltaBounds.min,
+      deltaMax: deltaBounds.max,
+      activeState,
+    });
+  }
+
+  let changed = false;
+
+  // Collect all unique time points for level checking
+  const timePoints = new Set<number>();
+  for (const event of events) {
+    if (event.activeState !== 'absent') {
+      timePoints.add(event.timeMin);
+      timePoints.add(event.timeMax);
+    }
+  }
+  const sortedTimes = [...timePoints].sort((a, b) => a - b);
+
+  // For each time point, compute the min/max possible level and check bounds
+  for (const t of sortedTimes) {
+    let minLevel = 0;
+    let maxLevel = 0;
+
+    for (const event of events) {
+      if (event.activeState === 'absent') continue;
+
+      if (event.timeMax <= t) {
+        // Event definitely occurs before t
+        if (event.activeState === 'present') {
+          minLevel += Math.min(event.deltaMin, event.deltaMax);
+          maxLevel += Math.max(event.deltaMin, event.deltaMax);
+        } else {
+          // maybe: could be 0 or delta
+          minLevel += Math.min(0, event.deltaMin, event.deltaMax);
+          maxLevel += Math.max(0, event.deltaMin, event.deltaMax);
+        }
+      } else if (event.timeMin <= t) {
+        // Event might occur before t
+        if (event.activeState === 'present') {
+          minLevel += Math.min(0, event.deltaMin, event.deltaMax);
+          maxLevel += Math.max(0, event.deltaMin, event.deltaMax);
+        } else {
+          minLevel += Math.min(0, event.deltaMin, event.deltaMax);
+          maxLevel += Math.max(0, event.deltaMin, event.deltaMax);
+        }
+      }
+    }
+
+    // Check for level violations
+    if (minLevel > ct.maxLevel || maxLevel < ct.minLevel) {
+      return 'INFEASIBLE';
+    }
+  }
+
+  // ---- Time domain tightening via forward sweep ----
+
+  // Helper: tighten timeMin of a time expression (time >= newMin)
+  function tightenTimeMin(expr: LinearExpr, newMin: number): boolean {
+    const sv = getSimpleVar(expr);
+    if (sv) {
+      return tightenLB(domains, sv.index, newMin);
+    }
+    const result = propagateLinear(
+      expr.vars, expr.coeffs, newMin - expr.offset, Infinity, domains
+    );
+    return result === 'CHANGED';
+  }
+
+  // Helper: tighten timeMax of a time expression (time <= newMax)
+  function tightenTimeMax(expr: LinearExpr, newMax: number): boolean {
+    const sv = getSimpleVar(expr);
+    if (sv) {
+      return tightenUB(domains, sv.index, newMax);
+    }
+    const result = propagateLinear(
+      expr.vars, expr.coeffs, -Infinity, newMax - expr.offset, domains
+    );
+    return result === 'CHANGED';
+  }
+
+  // Forward sweep: tighten time domains when level would be violated
+  {
+    const activeEvents = events.filter(e => e.activeState !== 'absent');
+
+    // Collect all unique boundary time points
+    const timePointSet = new Set<number>();
+    for (const ev of activeEvents) {
+      timePointSet.add(ev.timeMin);
+      timePointSet.add(ev.timeMax);
+    }
+    const sortedTimes = [...timePointSet].sort((a, b) => a - b);
+
+    for (let ti = 0; ti < sortedTimes.length; ti++) {
+      const t = sortedTimes[ti];
+      const nextTime = ti + 1 < sortedTimes.length ? sortedTimes[ti + 1] : undefined;
+
+      // Compute cumulative level range at time t.
+      // An event contributes to the level at t only if it has occurred by t.
+      // - Definitely occurred (timeMax <= t): contributes its full delta range
+      // - Might have occurred (timeMin <= t < timeMax): contributes 0 to delta range
+      //   (could be 0 if hasn't occurred, or delta if has)
+      // - Definitely not yet (timeMin > t): contributes 0
+      let levelMin = 0;
+      let levelMax = 0;
+      for (const ev of activeEvents) {
+        if (ev.timeMax <= t) {
+          // Definitely occurred by t
+          if (ev.activeState === 'present') {
+            levelMin += Math.min(ev.deltaMin, ev.deltaMax);
+            levelMax += Math.max(ev.deltaMin, ev.deltaMax);
+          } else {
+            // 'maybe' active: might not fire at all
+            levelMin += Math.min(0, ev.deltaMin, ev.deltaMax);
+            levelMax += Math.max(0, ev.deltaMin, ev.deltaMax);
+          }
+        } else if (ev.timeMin <= t) {
+          // Might have occurred by t (tentative)
+          // Contribution is 0 (hasn't occurred) to delta (has occurred)
+          levelMin += Math.min(0, ev.deltaMin, ev.deltaMax);
+          levelMax += Math.max(0, ev.deltaMin, ev.deltaMax);
+        }
+        // else: definitely not yet → contributes 0
+      }
+
+      // Overflow: levelMin > maxLevel → push positive tentative events later
+      if (levelMin > ct.maxLevel && nextTime !== undefined) {
+        // Only push events that are NOT yet definite and have positive deltaMin
+        for (const ev of activeEvents) {
+          if (ev.timeMin <= t && ev.timeMax > t && ev.deltaMin > 0) {
+            try {
+              if (tightenTimeMin(ct.times[ev.index], nextTime)) changed = true;
+            } catch {
+              return 'INFEASIBLE';
+            }
+          }
+        }
+      }
+
+      // Underflow: levelMax < minLevel → push negative tentative events later
+      if (levelMax < ct.minLevel && nextTime !== undefined) {
+        for (const ev of activeEvents) {
+          if (ev.timeMin <= t && ev.timeMax > t && ev.deltaMax < 0) {
+            try {
+              if (tightenTimeMin(ct.times[ev.index], nextTime)) changed = true;
+            } catch {
+              return 'INFEASIBLE';
+            }
+          }
+        }
+      }
+    }
+  }
+
+  // Propagation: tighten active literals based on level requirements
+  for (const event of events) {
+    if (event.activeState !== 'maybe') continue;
+    if (!ct.activeLiterals[event.index]) continue;
+
+    const activeLit = ct.activeLiterals[event.index];
+
+    // Compute level without this event at the latest possible time
+    let levelWithoutMin = 0;
+    let levelWithoutMax = 0;
+
+    for (const other of events) {
+      if (other.index === event.index) continue;
+      if (other.activeState === 'absent') continue;
+
+      if (other.timeMax <= event.timeMax) {
+        if (other.activeState === 'present') {
+          levelWithoutMin += Math.min(other.deltaMin, other.deltaMax);
+          levelWithoutMax += Math.max(other.deltaMin, other.deltaMax);
+        } else {
+          levelWithoutMin += Math.min(0, other.deltaMin, other.deltaMax);
+          levelWithoutMax += Math.max(0, other.deltaMin, other.deltaMax);
+        }
+      }
+    }
+
+    // If levelWithout < minLevel and this event is positive, it must be active
+    if (levelWithoutMax < ct.minLevel && event.deltaMin > 0) {
+      try {
+        const d = domains.get(activeLit.index);
+        if (d && d.size > 1) {
+          const newDomain = d.intersection(new Domain([1, 1]));
+          if (!newDomain.isEmpty && newDomain.size < d.size) {
+            domains.set(activeLit.index, newDomain);
+            changed = true;
+          }
+        }
+      } catch {
+        return 'INFEASIBLE';
+      }
+    }
+
+    // If levelWithout + delta > maxLevel and this event is positive, it must be inactive
+    if (levelWithoutMin + event.deltaMax > ct.maxLevel && event.deltaMax > 0) {
+      try {
+        const d = domains.get(activeLit.index);
+        if (d && d.size > 1) {
+          const newDomain = d.intersection(new Domain([0, 0]));
+          if (!newDomain.isEmpty && newDomain.size < d.size) {
+            domains.set(activeLit.index, newDomain);
+            changed = true;
+          }
+        }
+      } catch {
+        return 'INFEASIBLE';
+      }
+    }
+
+    // If levelWithout > maxLevel and this event is negative, it must be active
+    if (levelWithoutMin > ct.maxLevel && event.deltaMax < 0) {
+      try {
+        const d = domains.get(activeLit.index);
+        if (d && d.size > 1) {
+          const newDomain = d.intersection(new Domain([1, 1]));
+          if (!newDomain.isEmpty && newDomain.size < d.size) {
+            domains.set(activeLit.index, newDomain);
+            changed = true;
+          }
+        }
+      } catch {
+        return 'INFEASIBLE';
+      }
+    }
+
+    // If levelWithout + delta < minLevel and this event is negative, it must be inactive
+    if (levelWithoutMax + event.deltaMin < ct.minLevel && event.deltaMin < 0) {
+      try {
+        const d = domains.get(activeLit.index);
+        if (d && d.size > 1) {
+          const newDomain = d.intersection(new Domain([0, 0]));
+          if (!newDomain.isEmpty && newDomain.size < d.size) {
+            domains.set(activeLit.index, newDomain);
+            changed = true;
+          }
+        }
+      } catch {
+        return 'INFEASIBLE';
+      }
+    }
+  }
+
+  return changed ? 'CHANGED' : 'CONSISTENT';
+}
+
+/**
+ * Check if a reservoir constraint is satisfied in the solution.
+ * All variables must be fixed (domain size === 1).
+ */
+export function checkReservoir(
+  ct: ReservoirConstraint,
+  domains: Map<number, Domain>
+): boolean {
+  const n = ct.times.length;
+
+  interface Event {
+    time: number;
+    delta: number;
+  }
+
+  const events: Event[] = [];
+  for (let i = 0; i < n; i++) {
+    // Check if event is active
+    if (ct.activeLiterals[i]) {
+      const d = domains.get(ct.activeLiterals[i].index);
+      if (!d || d.size !== 1) return false;
+      if (d.min === 0) continue; // inactive
+    }
+
+    // Get time value
+    const timeExpr = ct.times[i];
+    let timeVal = timeExpr.offset;
+    for (let j = 0; j < timeExpr.vars.length; j++) {
+      const vd = domains.get(timeExpr.vars[j].index);
+      if (!vd || vd.size !== 1) return false;
+      timeVal += timeExpr.coeffs[j] * vd.min;
+    }
+
+    // Get delta value
+    const deltaExpr = ct.levelChanges[i];
+    let deltaVal = deltaExpr.offset;
+    for (let j = 0; j < deltaExpr.vars.length; j++) {
+      const vd = domains.get(deltaExpr.vars[j].index);
+      if (!vd || vd.size !== 1) return false;
+      deltaVal += deltaExpr.coeffs[j] * vd.min;
+    }
+
+    events.push({ time: timeVal, delta: deltaVal });
+  }
+
+  // Sort events by time
+  events.sort((a, b) => a.time - b.time);
+
+  // Check level at each event
+  let level = 0;
+  for (const event of events) {
+    level += event.delta;
+    if (level < ct.minLevel || level > ct.maxLevel) {
+      return false;
+    }
+  }
+
+  return true;
 }

@@ -3,7 +3,7 @@
  * Solver Engine - Backtracking search with constraint propagation and branch-and-bound
  */
 
-import { Domain, LinearExpr, CpSolverStatus, BoolVar, IntVar } from './types';
+import { Domain, LinearExpr, CpSolverStatus, BoolVar, IntVar, SolverParameters } from './types';
 import { IntVarImpl, BoolVarImpl, IntervalVarImpl } from './variables';
 import {
   Constraint,
@@ -30,6 +30,7 @@ import {
   CircuitConstraint,
   MultipleCircuitConstraint,
   ReservoirConstraint,
+  NoOverlap2DConstraint,
   MapDomainConstraint,
   AutomatonConstraint,
 } from './constraints';
@@ -42,9 +43,21 @@ import {
   propagateNoOverlapEdgeFinding,
   propagateCumulativeTimeTable,
   propagateCumulativeEdgeFinding,
+  propagateReservoir,
+  checkReservoir,
   PropagationResult,
   LinearPropagateFn,
 } from './scheduling-propagation';
+import {
+  propagateCircuit,
+  propagateMultipleCircuit,
+  checkCircuit,
+  checkMultipleCircuit,
+} from './circuit-propagation';
+import {
+  propagateNoOverlap2D,
+  checkNoOverlap2D,
+} from './nooverlap2d-propagation';
 
 // ============================================================================
 // Solver Statistics
@@ -80,6 +93,7 @@ export interface SolutionCallback {
  */
 export class SolverEngine {
   private _model: CpModel;
+  private _parameters: SolverParameters;
   private _stats: SolverStats;
   private _solution: Map<number, number> | null = null;
   private _allSolutions: Map<number, number>[] = [];
@@ -100,8 +114,9 @@ export class SolverEngine {
   private _activeConstraints: Set<number> | null = null;
   private _derivedVars: Map<number, DerivedVar> | null = null;
 
-  constructor(model: CpModel) {
+  constructor(model: CpModel, parameters: SolverParameters = {}) {
     this._model = model;
+    this._parameters = parameters;
     this._stats = {
       numConflicts: 0,
       numBranches: 0,
@@ -597,11 +612,18 @@ export class SolverEngine {
       case 'CUMULATIVE':
         return this._checkCumulative(constraint as CumulativeConstraint, domains);
       case 'CIRCUIT':
+        return this._checkCircuit(constraint as CircuitConstraint, domains);
       case 'MULTIPLE_CIRCUIT':
+        return this._checkMultipleCircuit(constraint as MultipleCircuitConstraint, domains);
       case 'RESERVOIR':
-      case 'MAP_DOMAIN':
-      case 'AUTOMATON':
+        return this._checkReservoir(constraint as ReservoirConstraint, domains);
       case 'NO_OVERLAP_2D':
+        return this._checkNoOverlap2D(constraint as NoOverlap2DConstraint, domains);
+      case 'MAP_DOMAIN':
+        // MAP_DOMAIN is decomposed into ExactlyOne + Linear constraints at model time
+        // The decomposed constraints handle verification
+        return true;
+      case 'AUTOMATON':
         throw new Error(
           `${constraint.type} constraint is not yet implemented. ` +
           `Solutions cannot be verified against this constraint. ` +
@@ -952,6 +974,34 @@ export class SolverEngine {
     return true;
   }
 
+  /**
+   * Check Circuit constraint: solution must form a single Hamiltonian cycle
+   */
+  private _checkCircuit(ct: CircuitConstraint, domains: Map<number, Domain>): boolean {
+    return checkCircuit(ct, domains);
+  }
+
+  /**
+   * Check MultipleCircuit constraint: solution must form valid routes through depot
+   */
+  private _checkMultipleCircuit(ct: MultipleCircuitConstraint, domains: Map<number, Domain>): boolean {
+    return checkMultipleCircuit(ct, domains);
+  }
+
+  /**
+   * Check Reservoir constraint: level must stay within bounds
+   */
+  private _checkReservoir(ct: ReservoirConstraint, domains: Map<number, Domain>): boolean {
+    return checkReservoir(ct, domains);
+  }
+
+  /**
+   * Check NoOverlap2D constraint: rectangles must not overlap
+   */
+  private _checkNoOverlap2D(ct: NoOverlap2DConstraint, domains: Map<number, Domain>): boolean {
+    return checkNoOverlap2D(ct, domains);
+  }
+
   // ============================================================================
   // Constraint Propagation
   // ============================================================================
@@ -996,6 +1046,11 @@ export class SolverEngine {
    * Propagate a single constraint
    */
   private _propagateConstraint(constraint: Constraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
+    // Skip propagation if this constraint type is disabled (for benchmarking)
+    if (this._parameters.disablePropagationForTypes?.includes(constraint.type)) {
+      return 'CONSISTENT';
+    }
+
     switch (constraint.type) {
       case 'LINEAR':
         return this._propagateLinear(constraint as LinearConstraint, domains);
@@ -1027,6 +1082,14 @@ export class SolverEngine {
         return this._propagateNoOverlapConstraint(constraint as NoOverlapConstraint, domains);
       case 'CUMULATIVE':
         return this._propagateCumulativeConstraint(constraint as CumulativeConstraint, domains);
+      case 'CIRCUIT':
+        return this._propagateCircuitConstraint(constraint as CircuitConstraint, domains);
+      case 'MULTIPLE_CIRCUIT':
+        return this._propagateMultipleCircuitConstraint(constraint as MultipleCircuitConstraint, domains);
+      case 'RESERVOIR':
+        return this._propagateReservoirConstraint(constraint as ReservoirConstraint, domains);
+      case 'NO_OVERLAP_2D':
+        return this._propagateNoOverlap2DConstraint(constraint as NoOverlap2DConstraint, domains);
       default:
         return 'CONSISTENT';
     }
@@ -1757,6 +1820,82 @@ export class SolverEngine {
       return 'CHANGED';
     }
     return 'CONSISTENT';
+  }
+
+  /**
+   * Orchestrate Circuit propagation: degree → path tracing → subtour detection
+   */
+  private _propagateCircuitConstraint(
+    ct: CircuitConstraint,
+    domains: Map<number, Domain>
+  ): PropagationResult {
+    const boolFn = (varIndex: number, value: boolean, d: Map<number, Domain>): PropagationResult => {
+      try {
+        const current = d.get(varIndex);
+        if (!current) return 'CONSISTENT';
+        const target = value ? 1 : 0;
+        if (current.size === 1 && current.min === target) return 'CONSISTENT';
+        const newDomain = current.intersection(new Domain([target, target]));
+        if (newDomain.isEmpty) return 'INFEASIBLE';
+        d.set(varIndex, newDomain);
+        return 'CHANGED';
+      } catch {
+        return 'INFEASIBLE';
+      }
+    };
+
+    return propagateCircuit(ct, domains, boolFn);
+  }
+
+  /**
+   * Orchestrate MultipleCircuit propagation
+   */
+  private _propagateMultipleCircuitConstraint(
+    ct: MultipleCircuitConstraint,
+    domains: Map<number, Domain>
+  ): PropagationResult {
+    const boolFn = (varIndex: number, value: boolean, d: Map<number, Domain>): PropagationResult => {
+      try {
+        const current = d.get(varIndex);
+        if (!current) return 'CONSISTENT';
+        const target = value ? 1 : 0;
+        if (current.size === 1 && current.min === target) return 'CONSISTENT';
+        const newDomain = current.intersection(new Domain([target, target]));
+        if (newDomain.isEmpty) return 'INFEASIBLE';
+        d.set(varIndex, newDomain);
+        return 'CHANGED';
+      } catch {
+        return 'INFEASIBLE';
+      }
+    };
+
+    return propagateMultipleCircuit(ct, domains, boolFn);
+  }
+
+  /**
+   * Orchestrate Reservoir propagation: forward/backward sweep + active literal propagation
+   */
+  private _propagateReservoirConstraint(
+    ct: ReservoirConstraint,
+    domains: Map<number, Domain>
+  ): PropagationResult {
+    const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d) =>
+      this._propagateLinearCallback(vars, coeffs, lb, ub, d);
+
+    return propagateReservoir(ct, domains, linFn);
+  }
+
+  /**
+   * Orchestrate NoOverlap2D propagation: pairwise restriction + energy-based conflict
+   */
+  private _propagateNoOverlap2DConstraint(
+    ct: NoOverlap2DConstraint,
+    domains: Map<number, Domain>
+  ): PropagationResult {
+    const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d) =>
+      this._propagateLinearCallback(vars, coeffs, lb, ub, d);
+
+    return propagateNoOverlap2D(ct, domains, linFn);
   }
 
   // ============================================================================

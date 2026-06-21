@@ -748,23 +748,51 @@ describe('Constraints', () => {
 });
 
 describe('Constraints - edge cases', () => {
-  describe('unimplemented constraints', () => {
-    it('should throw for CIRCUIT constraint', () => {
+  describe('implemented constraints (formerly unimplemented)', () => {
+    it('should solve CIRCUIT constraint', () => {
       const model = new CpModel();
-      const x = model.newBoolVar('x');
-      model.addCircuit([[0, 1, x]]);
+      // Create a simple 3-node circuit: 0->1->2->0
+      const x01 = model.newBoolVar('x01');
+      const x12 = model.newBoolVar('x12');
+      const x20 = model.newBoolVar('x20');
+      const x10 = model.newBoolVar('x10');
+      const x21 = model.newBoolVar('x21');
+      const x02 = model.newBoolVar('x02');
+      model.addCircuit([
+        [0, 1, x01],
+        [1, 2, x12],
+        [2, 0, x20],
+        [1, 0, x10],
+        [2, 1, x21],
+        [0, 2, x02],
+      ]);
 
       const solver = new CpSolver();
-      expect(() => solver.solve(model)).toThrow('not yet implemented');
+      const status = solver.solve(model);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
     });
 
-    it('should throw for MULTIPLE_CIRCUIT constraint', () => {
+    it('should solve MULTIPLE_CIRCUIT constraint', () => {
       const model = new CpModel();
-      const x = model.newBoolVar('x');
-      model.addMultipleCircuit([[0, 1, x]]);
+      // Create a simple 3-node circuit through depot (node 0): 0->1->2->0
+      const x01 = model.newBoolVar('x01');
+      const x12 = model.newBoolVar('x12');
+      const x20 = model.newBoolVar('x20');
+      const x10 = model.newBoolVar('x10');
+      const x21 = model.newBoolVar('x21');
+      const x02 = model.newBoolVar('x02');
+      model.addMultipleCircuit([
+        [0, 1, x01],
+        [1, 2, x12],
+        [2, 0, x20],
+        [1, 0, x10],
+        [2, 1, x21],
+        [0, 2, x02],
+      ]);
 
       const solver = new CpSolver();
-      expect(() => solver.solve(model)).toThrow('not yet implemented');
+      const status = solver.solve(model);
+      expect([CpSolverStatus.OPTIMAL, CpSolverStatus.FEASIBLE]).toContain(status);
     });
 
     it('should throw for AUTOMATON constraint', () => {
@@ -776,7 +804,7 @@ describe('Constraints - edge cases', () => {
       expect(() => solver.solve(model)).toThrow('not yet implemented');
     });
 
-    it('should throw for MAP_DOMAIN constraint', () => {
+    it('should solve MAP_DOMAIN constraint', () => {
       const model = new CpModel();
       const x = model.newIntVar(0, 2, 'x');
       const vars = [
@@ -787,7 +815,158 @@ describe('Constraints - edge cases', () => {
       model.addMapDomain(x, vars);
 
       const solver = new CpSolver();
-      expect(() => solver.solve(model)).toThrow('not yet implemented');
+      const status = solver.solve(model);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+
+      // Verify the mapping is correct
+      const xVal = solver.value(x);
+      for (let i = 0; i < vars.length; i++) {
+        if (i === xVal) {
+          expect(solver.booleanValue(vars[i])).toBe(true);
+        } else {
+          expect(solver.booleanValue(vars[i])).toBe(false);
+        }
+      }
+    });
+
+    it('should solve MAP_DOMAIN with offset', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(5, 7, 'x');
+      const vars = [
+        model.newBoolVar('b0'),
+        model.newBoolVar('b1'),
+        model.newBoolVar('b2'),
+      ];
+      model.addMapDomain(x, vars, 5);
+
+      const solver = new CpSolver();
+      const status = solver.solve(model);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+
+      // Verify the mapping is correct with offset
+      const xVal = solver.value(x);
+      for (let i = 0; i < vars.length; i++) {
+        if (i + 5 === xVal) {
+          expect(solver.booleanValue(vars[i])).toBe(true);
+        } else {
+          expect(solver.booleanValue(vars[i])).toBe(false);
+        }
+      }
+    });
+
+    it('should solve MAP_DOMAIN with single value', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 0, 'x');
+      const vars = [model.newBoolVar('b0')];
+      model.addMapDomain(x, vars);
+
+      const solver = new CpSolver();
+      const status = solver.solve(model);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+
+      // Verify the mapping is correct
+      expect(solver.booleanValue(vars[0])).toBe(true);
+    });
+
+    it('should solve MAP_DOMAIN with many values', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 4, 'x');
+      const vars = [
+        model.newBoolVar('b0'),
+        model.newBoolVar('b1'),
+        model.newBoolVar('b2'),
+        model.newBoolVar('b3'),
+        model.newBoolVar('b4'),
+      ];
+      model.addMapDomain(x, vars);
+
+      const solver = new CpSolver();
+      const status = solver.solve(model);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+
+      // Verify the mapping is correct
+      const xVal = solver.value(x);
+      for (let i = 0; i < vars.length; i++) {
+        if (i === xVal) {
+          expect(solver.booleanValue(vars[i])).toBe(true);
+        } else {
+          expect(solver.booleanValue(vars[i])).toBe(false);
+        }
+      }
+    });
+
+    it('should solve MAP_DOMAIN with constrained value', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 4, 'x');
+      const vars = [
+        model.newBoolVar('b0'),
+        model.newBoolVar('b1'),
+        model.newBoolVar('b2'),
+        model.newBoolVar('b3'),
+        model.newBoolVar('b4'),
+      ];
+      model.addMapDomain(x, vars);
+
+      // Force x to be 2
+      model.add(x.eq(2));
+
+      const solver = new CpSolver();
+      const status = solver.solve(model);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+
+      // Verify the mapping is correct
+      expect(solver.value(x)).toBe(2);
+      expect(solver.booleanValue(vars[0])).toBe(false);
+      expect(solver.booleanValue(vars[1])).toBe(false);
+      expect(solver.booleanValue(vars[2])).toBe(true);
+      expect(solver.booleanValue(vars[3])).toBe(false);
+      expect(solver.booleanValue(vars[4])).toBe(false);
+    });
+
+    it('should solve MAP_DOMAIN with constrained boolean', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 4, 'x');
+      const vars = [
+        model.newBoolVar('b0'),
+        model.newBoolVar('b1'),
+        model.newBoolVar('b2'),
+        model.newBoolVar('b3'),
+        model.newBoolVar('b4'),
+      ];
+      model.addMapDomain(x, vars);
+
+      // Force b3 to be true
+      model.addBoolAnd([vars[3]]);
+
+      const solver = new CpSolver();
+      const status = solver.solve(model);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+
+      // Verify the mapping is correct
+      expect(solver.value(x)).toBe(3);
+      expect(solver.booleanValue(vars[0])).toBe(false);
+      expect(solver.booleanValue(vars[1])).toBe(false);
+      expect(solver.booleanValue(vars[2])).toBe(false);
+      expect(solver.booleanValue(vars[3])).toBe(true);
+      expect(solver.booleanValue(vars[4])).toBe(false);
+    });
+
+    it('should enumerate all MAP_DOMAIN solutions', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 2, 'x');
+      const vars = [
+        model.newBoolVar('b0'),
+        model.newBoolVar('b1'),
+        model.newBoolVar('b2'),
+      ];
+      model.addMapDomain(x, vars);
+
+      const solver = new CpSolver();
+      solver.parameters.enumerateAllSolutions = true;
+      const status = solver.solve(model);
+
+      // Should find 3 solutions (x=0, x=1, x=2)
+      expect(solver.numSolutions).toBe(3);
     });
   });
 

@@ -557,7 +557,6 @@ export class CpModel {
    * ```
    */
   addCircuit(arcs: [number, number, BoolVarImpl][]): CircuitConstraint {
-    console.warn('CIRCUIT constraint is not yet implemented — solutions may not be verified against this constraint');
     const index = this._constraints.length;
     const constraint = new CircuitConstraint(index, arcs);
     this._constraints.push(constraint);
@@ -571,7 +570,6 @@ export class CpModel {
    * @returns The added constraint
    */
   addMultipleCircuit(arcs: [number, number, BoolVarImpl][]): MultipleCircuitConstraint {
-    console.warn('MULTIPLE_CIRCUIT constraint is not yet implemented — solutions may not be verified against this constraint');
     const index = this._constraints.length;
     const constraint = new MultipleCircuitConstraint(index, arcs);
     this._constraints.push(constraint);
@@ -680,7 +678,6 @@ export class CpModel {
     minLevel: number,
     maxLevel: number
   ): ReservoirConstraint {
-    console.warn('RESERVOIR constraint is not yet implemented — solutions may not be verified against this constraint');
     const index = this._constraints.length;
     const constraint = new ReservoirConstraint(
       index,
@@ -711,7 +708,6 @@ export class CpModel {
     minLevel: number,
     maxLevel: number
   ): ReservoirConstraint {
-    console.warn('RESERVOIR constraint is not yet implemented — solutions may not be verified against this constraint');
     const index = this._constraints.length;
     const constraint = new ReservoirConstraint(
       index,
@@ -728,6 +724,13 @@ export class CpModel {
   /**
    * Add a map domain constraint
    *
+   * Maps an integer variable to a set of boolean variables:
+   *   var_ == i + offset  <=>  boolVarArray[i] == true, for all i
+   *
+   * Decomposed into:
+   * 1. ExactlyOne(boolVarArray) — exactly one boolean must be true
+   * 2. var_ == sum((i + offset) * boolVarArray[i]) — var_ equals the selected value
+   *
    * @param var_ - Integer variable
    * @param boolVarArray - Boolean variables
    * @param offset - Offset
@@ -737,7 +740,18 @@ export class CpModel {
     boolVarArray: BoolVarImpl[],
     offset: number = 0
   ): MapDomainConstraint {
-    console.warn('MAP_DOMAIN constraint is not yet implemented — solutions may not be verified against this constraint');
+    // Constraint 1: Exactly one boolean must be true
+    this.addExactlyOne(boolVarArray);
+
+    // Constraint 2: var_ == sum((i + offset) * boolVarArray[i])
+    // This ensures var_ equals the value corresponding to the true boolean
+    const terms: LinearExpr[] = [];
+    for (let i = 0; i < boolVarArray.length; i++) {
+      terms.push(boolVarArray[i].mul(i + offset));
+    }
+    const sumExpr = terms.reduce((a, b) => a.add(b));
+    this.add(var_.eq(sumExpr));
+
     const index = this._constraints.length;
     const constraint = new MapDomainConstraint(index, var_, boolVarArray, offset);
     this._constraints.push(constraint);
@@ -1012,7 +1026,6 @@ export class CpModel {
     xIntervals: IntervalVarImpl[],
     yIntervals: IntervalVarImpl[]
   ): NoOverlap2DConstraint {
-    console.warn('NO_OVERLAP_2D constraint is not yet implemented — solutions may not be verified against this constraint');
     const index = this._constraints.length;
     const constraint = new NoOverlap2DConstraint(index, xIntervals, yIntervals);
     this._constraints.push(constraint);

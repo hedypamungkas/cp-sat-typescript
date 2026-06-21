@@ -22,7 +22,11 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "lint": "eslint src tests --ext .ts",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "benchmark": "npx tsx benchmarks/scheduling-benchmark.ts && npx tsx benchmarks/circuit-benchmark.ts && npx tsx benchmarks/reservoir-benchmark.ts && npx tsx benchmarks/nooverlap2d-benchmark.ts",
+    "benchmark:circuit": "npx tsx benchmarks/circuit-benchmark.ts",
+    "benchmark:reservoir": "npx tsx benchmarks/reservoir-benchmark.ts",
+    "benchmark:nooverlap2d": "npx tsx benchmarks/nooverlap2d-benchmark.ts"
   },
   "keywords": [
     "constraint-programming",
