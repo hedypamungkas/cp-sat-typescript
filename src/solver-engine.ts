@@ -125,11 +125,12 @@ export class SolverEngine {
   // Search progress reporting
   private _progressCallback: SearchProgressCallback | null = null;
   private _lastLogTime: number = 0;
-  private static readonly _LOG_INTERVAL_MS = 1000;
+  private _logIntervalMs: number = 1000;
 
   constructor(model: CpModel, parameters: SolverParameters = {}) {
     this._model = model;
     this._parameters = parameters;
+    this._logIntervalMs = parameters.progressCallbackIntervalMs ?? 1000;
     this._stats = {
       numConflicts: 0,
       numBranches: 0,
@@ -202,6 +203,7 @@ export class SolverEngine {
     this._stats.presolveTime = (Date.now() - presolveStart) / 1000;
 
     if (presolveResult.status === 'INFEASIBLE') {
+      if (this._model.assumptions.length > 0) this._infeasibleAfterAssumptions = true;
       this._stats.wallTime = (Date.now() - this._startTime) / 1000;
       return CpSolverStatus.INFEASIBLE;
     }
@@ -249,6 +251,7 @@ export class SolverEngine {
 
     // No solution found
     if (status === CpSolverStatus.INFEASIBLE) {
+      if (this._model.assumptions.length > 0) this._infeasibleAfterAssumptions = true;
       return CpSolverStatus.INFEASIBLE;
     }
 
@@ -312,15 +315,16 @@ export class SolverEngine {
       const lit = this._model.assumptions[i];
       const domain = domains.get(lit.index);
       if (!domain) continue;
+      // Always record the assumption reason for core extraction,
+      // even if the domain already contains the assumed value.
+      this._reasonTrail.setReason(lit.index, { type: 'assumption', assumptionIndex: i });
       if (!domain.contains(1)) {
-        // Assumption contradicts current domain — record reason for core extraction
-        this._reasonTrail.setReason(lit.index, { type: 'assumption', assumptionIndex: i });
+        // Assumption contradicts current domain
         this._infeasibleAfterAssumptions = true;
         return false;
       }
       if (domain.min !== 1 || domain.max !== 1) {
         domains.set(lit.index, domain.fixValue(1));
-        this._reasonTrail.setReason(lit.index, { type: 'assumption', assumptionIndex: i });
       }
     }
     return true;
@@ -631,7 +635,7 @@ export class SolverEngine {
     if (!this._parameters.logSearchProgress && !this._progressCallback) return;
 
     const now = Date.now();
-    if (now - this._lastLogTime < SolverEngine._LOG_INTERVAL_MS) return;
+    if (this._logIntervalMs > 0 && now - this._lastLogTime < this._logIntervalMs) return;
     this._lastLogTime = now;
 
     const bound = this._computeObjectiveBound(domains);
@@ -1357,6 +1361,7 @@ export class SolverEngine {
         const newDomain = new Domain(newIntervals);
         if (newDomain.size < d.size) {
           domains.set(v.index, newDomain);
+          this._reasonTrail.setReason(v.index, { type: 'propagation', constraintIndex: ct.index });
           this._stats.numIntegerPropagations++;
           changed = true;
         }
@@ -1409,6 +1414,7 @@ export class SolverEngine {
         const newDomain = d.removeValue(forbidden);
         if (newDomain.isEmpty) return 'INFEASIBLE';
         domains.set(vars[i].index, newDomain);
+        this._reasonTrail.setReason(vars[i].index, { type: 'propagation', constraintIndex: ct.index });
         this._stats.numIntegerPropagations++;
         changed = true;
       }
@@ -1480,6 +1486,7 @@ export class SolverEngine {
             if (newDomain.isEmpty) return 'INFEASIBLE';
             if (newDomain.size < otherD.size) {
               domains.set(other.varIndex, newDomain);
+              this._reasonTrail.setReason(other.varIndex, { type: 'propagation', constraintIndex: ct.index });
               changed = true;
             }
           }
@@ -1497,6 +1504,7 @@ export class SolverEngine {
             if (newDomain.isEmpty) return 'INFEASIBLE';
             if (newDomain.size < varD.size) {
               domains.set(varIdx, newDomain);
+              this._reasonTrail.setReason(varIdx, { type: 'propagation', constraintIndex: ct.index });
               changed = true;
             }
           }
@@ -1647,6 +1655,7 @@ export class SolverEngine {
       // XOR: trueCount + (unassigned ? 1 : 0) must be odd
       const needed = (trueCount % 2 === 0) ? 1 : 0; // need odd total
       domains.set(unassigned[0].index, new Domain([needed, needed]));
+      this._reasonTrail.setReason(unassigned[0].index, { type: 'propagation', constraintIndex: ct.index });
       this._stats.numBooleanPropagations++;
       return 'CHANGED';
     }
@@ -1709,6 +1718,7 @@ export class SolverEngine {
       const nd = targetDomain.lessOrEqual(maxUb);
       if (nd.isEmpty) return 'INFEASIBLE';
       domains.set(ct.target.index, nd);
+      this._reasonTrail.setReason(ct.target.index, { type: 'propagation', constraintIndex: ct.index });
       this._stats.numIntegerPropagations++;
       changed = true;
     }
@@ -1724,6 +1734,7 @@ export class SolverEngine {
           const nd = varDomain.lessOrEqual(targetMax);
           if (nd.isEmpty) return 'INFEASIBLE';
           domains.set(varIdx, nd);
+          this._reasonTrail.setReason(varIdx, { type: 'propagation', constraintIndex: ct.index });
           this._stats.numIntegerPropagations++;
           changed = true;
         }
@@ -1770,6 +1781,7 @@ export class SolverEngine {
       const nd = targetDomain.greaterOrEqual(minLb);
       if (nd.isEmpty) return 'INFEASIBLE';
       domains.set(ct.target.index, nd);
+      this._reasonTrail.setReason(ct.target.index, { type: 'propagation', constraintIndex: ct.index });
       this._stats.numIntegerPropagations++;
       changed = true;
     }
@@ -1785,6 +1797,7 @@ export class SolverEngine {
           const nd = varDomain.greaterOrEqual(targetMin);
           if (nd.isEmpty) return 'INFEASIBLE';
           domains.set(varIdx, nd);
+          this._reasonTrail.setReason(varIdx, { type: 'propagation', constraintIndex: ct.index });
           this._stats.numIntegerPropagations++;
           changed = true;
         }
@@ -1838,6 +1851,7 @@ export class SolverEngine {
     if (fwdTarget.isEmpty) return 'INFEASIBLE';
     if (fwdTarget.size < targetDom.size) {
       domains.set(ct.target.index, fwdTarget);
+      this._reasonTrail.setReason(ct.target.index, { type: 'propagation', constraintIndex: ct.index });
       this._stats.numIntegerPropagations++;
       changed = true;
     }
@@ -1864,6 +1878,7 @@ export class SolverEngine {
         }
         if (nd.size < numVarDom.size) {
           domains.set(numVarIdx, nd);
+          this._reasonTrail.setReason(numVarIdx, { type: 'propagation', constraintIndex: ct.index });
           this._stats.numIntegerPropagations++;
           changed = true;
         }
@@ -1910,6 +1925,7 @@ export class SolverEngine {
       const newTargetDomain = new Domain(newIntervals);
       if (newTargetDomain.size < targetDomain.size) {
         domains.set(ct.target.index, newTargetDomain);
+        this._reasonTrail.setReason(ct.target.index, { type: 'propagation', constraintIndex: ct.index });
         changed = true;
       }
     }
@@ -1941,6 +1957,7 @@ export class SolverEngine {
       const newIndexDomain = new Domain(newIntervals);
       if (newIndexDomain.size < indexDomain.size) {
         domains.set(ct.indexVar.index, newIndexDomain);
+        this._reasonTrail.setReason(ct.indexVar.index, { type: 'propagation', constraintIndex: ct.index });
         changed = true;
       }
     }
@@ -1961,6 +1978,7 @@ export class SolverEngine {
       if (newTargetDomain.isEmpty) return 'INFEASIBLE';
       if (newTargetDomain.size < targetDomain.size) {
         domains.set(ct.target.index, newTargetDomain);
+        this._reasonTrail.setReason(ct.target.index, { type: 'propagation', constraintIndex: ct.index });
         return 'CHANGED';
       }
     }
@@ -1990,6 +2008,7 @@ export class SolverEngine {
       if (newTarget.isEmpty) return 'INFEASIBLE';
       if (newTarget.size < targetDomain.size) {
         domains.set(ct.target.index, newTarget);
+        this._reasonTrail.setReason(ct.target.index, { type: 'propagation', constraintIndex: ct.index });
         changed = true;
       }
     }
@@ -2001,6 +2020,7 @@ export class SolverEngine {
       if (newTarget.isEmpty) return 'INFEASIBLE';
       if (newTarget.size < currentTarget.size) {
         domains.set(ct.target.index, newTarget);
+        this._reasonTrail.setReason(ct.target.index, { type: 'propagation', constraintIndex: ct.index });
         changed = true;
       }
     }
@@ -2017,6 +2037,7 @@ export class SolverEngine {
           if (newExprDomain.isEmpty) return 'INFEASIBLE';
           if (newExprDomain.size < exprVarDomain.size) {
             domains.set(exprVar.index, newExprDomain);
+            this._reasonTrail.setReason(exprVar.index, { type: 'propagation', constraintIndex: ct.index });
             changed = true;
           }
         }
@@ -2036,6 +2057,7 @@ export class SolverEngine {
           if (newExprDomain.isEmpty) return 'INFEASIBLE';
           if (newExprDomain.size < exprVarDomain.size) {
             domains.set(exprVar.index, newExprDomain);
+            this._reasonTrail.setReason(exprVar.index, { type: 'propagation', constraintIndex: ct.index });
             changed = true;
           }
         }
@@ -2097,6 +2119,7 @@ export class SolverEngine {
       const newDomain = new Domain(newIntervals);
       if (newDomain.size < d.size) {
         domains.set(v.index, newDomain);
+        this._reasonTrail.setReason(v.index, { type: 'propagation', constraintIndex: ct.index });
         changed = true;
       }
     }
@@ -2205,6 +2228,7 @@ export class SolverEngine {
       const newDomain = new Domain(newIntervals);
       if (newDomain.size < d.size) {
         domains.set(v.index, newDomain);
+        this._reasonTrail.setReason(v.index, { type: 'propagation', constraintIndex: ct.index });
         changed = true;
       }
     }
@@ -2494,6 +2518,18 @@ export class SolverEngine {
           for (const v of c.vars) indices.push(v.index);
           break;
         }
+        case 'NOT_EQUAL': {
+          const c = ct as NotEqualConstraint;
+          for (const v of c.expr.vars) indices.push(v.index);
+          break;
+        }
+        case 'ALL_DIFFERENT': {
+          const c = ct as AllDifferentConstraint;
+          for (const expr of c.expressions) {
+            for (const v of expr.vars) indices.push(v.index);
+          }
+          break;
+        }
         case 'BOOL_OR':
         case 'BOOL_AND':
         case 'AT_MOST_ONE':
@@ -2508,8 +2544,126 @@ export class SolverEngine {
           indices.push(c.a.index, c.b.index);
           break;
         }
+        case 'MAX_EQUALITY':
+        case 'MIN_EQUALITY': {
+          const c = ct as MaxEqualityConstraint;
+          indices.push(c.target.index);
+          for (const expr of c.expressions) {
+            for (const v of expr.vars) indices.push(v.index);
+          }
+          break;
+        }
+        case 'ELEMENT': {
+          const c = ct as ElementConstraint;
+          indices.push(c.indexVar.index, c.target.index);
+          for (const v of c.vars) indices.push(v.index);
+          break;
+        }
+        case 'ABS_EQUALITY': {
+          const c = ct as AbsEqualityConstraint;
+          indices.push(c.target.index);
+          for (const v of c.expr.vars) indices.push(v.index);
+          break;
+        }
+        case 'DIVISION_EQUALITY': {
+          const c = ct as DivisionEqualityConstraint;
+          indices.push(c.target.index);
+          for (const v of c.num.vars) indices.push(v.index);
+          for (const v of c.denom.vars) indices.push(v.index);
+          break;
+        }
+        case 'MODULO_EQUALITY': {
+          const c = ct as ModuloEqualityConstraint;
+          indices.push(c.target.index);
+          for (const v of c.expr.vars) indices.push(v.index);
+          for (const v of c.mod.vars) indices.push(v.index);
+          break;
+        }
+        case 'MULTIPLICATION_EQUALITY': {
+          const c = ct as MultiplicationEqualityConstraint;
+          indices.push(c.target.index);
+          for (const expr of c.expressions) {
+            for (const v of expr.vars) indices.push(v.index);
+          }
+          break;
+        }
+        case 'ALLOWED_ASSIGNMENTS':
+        case 'FORBIDDEN_ASSIGNMENTS': {
+          const c = ct as AllowedAssignmentsConstraint;
+          for (const v of c.vars) indices.push(v.index);
+          break;
+        }
+        case 'AUTOMATON': {
+          const c = ct as AutomatonConstraint;
+          for (const v of c.vars) indices.push(v.index);
+          break;
+        }
+        case 'INVERSE': {
+          const c = ct as InverseConstraint;
+          for (const v of c.fDirect) indices.push(v.index);
+          for (const v of c.fInverse) indices.push(v.index);
+          break;
+        }
+        case 'RESERVOIR': {
+          const c = ct as ReservoirConstraint;
+          for (const expr of c.times) {
+            for (const v of expr.vars) indices.push(v.index);
+          }
+          for (const expr of c.levelChanges) {
+            for (const v of expr.vars) indices.push(v.index);
+          }
+          for (const v of c.activeLiterals) indices.push(v.index);
+          break;
+        }
+        case 'CIRCUIT':
+        case 'MULTIPLE_CIRCUIT': {
+          const c = ct as CircuitConstraint;
+          for (const [, , lit] of c.arcs) indices.push(lit.index);
+          break;
+        }
+        case 'NO_OVERLAP': {
+          const c = ct as NoOverlapConstraint;
+          for (const iv of c.intervals) {
+            const ivImpl = iv as IntervalVarImpl;
+            for (const v of ivImpl.start.vars) indices.push(v.index);
+            for (const v of ivImpl.end.vars) indices.push(v.index);
+          }
+          break;
+        }
+        case 'NO_OVERLAP_2D': {
+          const c = ct as NoOverlap2DConstraint;
+          for (const iv of c.xIntervals) {
+            const ivImpl = iv as IntervalVarImpl;
+            for (const v of ivImpl.start.vars) indices.push(v.index);
+            for (const v of ivImpl.end.vars) indices.push(v.index);
+          }
+          for (const iv of c.yIntervals) {
+            const ivImpl = iv as IntervalVarImpl;
+            for (const v of ivImpl.start.vars) indices.push(v.index);
+            for (const v of ivImpl.end.vars) indices.push(v.index);
+          }
+          break;
+        }
+        case 'CUMULATIVE': {
+          const c = ct as CumulativeConstraint;
+          for (const iv of c.intervals) {
+            const ivImpl = iv as IntervalVarImpl;
+            for (const v of ivImpl.start.vars) indices.push(v.index);
+            for (const v of ivImpl.end.vars) indices.push(v.index);
+          }
+          for (const expr of c.demands) {
+            for (const v of expr.vars) indices.push(v.index);
+          }
+          for (const v of c.capacity.vars) indices.push(v.index);
+          break;
+        }
+        case 'MAP_DOMAIN': {
+          const c = ct as MapDomainConstraint;
+          indices.push(c.var_.index);
+          for (const v of c.boolVars) indices.push(v.index);
+          break;
+        }
         default:
-          // For other constraint types, we don't track reasons yet
           break;
       }
       return indices;

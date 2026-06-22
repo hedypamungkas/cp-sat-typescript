@@ -799,6 +799,12 @@ export interface SolverParameters {
   numWorkers?: number;
   /** Log search progress */
   logSearchProgress?: boolean;
+  /**
+   * Interval in milliseconds between SearchProgressCallback invocations.
+   * Default: 1000 (1 second). Set to a lower value for more frequent updates
+   * (e.g., 100ms for real-time dashboards). Set to 0 to disable throttling.
+   */
+  progressCallbackIntervalMs?: number;
   /** Random seed */
   randomSeed?: number;
   /** Linearization level */
