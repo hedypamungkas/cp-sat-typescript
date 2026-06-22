@@ -345,6 +345,15 @@ export class Domain {
   }
 
   /**
+   * Create an independent copy of this domain.
+   * Domain is immutable, so this is rarely needed at runtime, but it is useful
+   * for pre/post comparisons in tests and for trail-based undo records.
+   */
+  clone(): Domain {
+    return new Domain(this._intervals.map(([lb, ub]) => [lb, ub] as [number, number]) as DomainIntervals);
+  }
+
+  /**
    * Intersect with another domain
    */
   intersection(other: Domain): Domain {
@@ -626,15 +635,13 @@ export class LinearExpr {
   }
 
   /**
-   * Create a not-equal constraint expression
+   * Create a not-equal constraint expression: this != other.
+   * Represented as (this - other) != 0, which the solver turns into a
+   * NotEqualConstraint that can remove a single value from a domain.
    */
-  ne(other: LinearExprLike | number): BoundedLinearExpression {
+  ne(other: LinearExprLike | number): NotEqualExpression {
     const expr = LinearExpr.from(other);
-    return new BoundedLinearExpression(
-      this.sub(expr),
-      -Infinity,
-      -1
-    );
+    return new NotEqualExpression(this.sub(expr), 0);
   }
 
   /**
@@ -698,6 +705,25 @@ export class BoundedLinearExpression {
   }
 }
 
+/**
+ * A not-equal expression: `expr != value`. Produced by the `.ne()` operator.
+ * Unlike BoundedLinearExpression (a single linear inequality), this carries a
+ * disequality that can prune an individual value from a domain.
+ */
+export class NotEqualExpression {
+  readonly expr: LinearExpr;
+  readonly value: number;
+
+  constructor(expr: LinearExpr, value: number) {
+    this.expr = expr;
+    this.value = value;
+  }
+
+  toString(): string {
+    return `${this.expr} != ${this.value}`;
+  }
+}
+
 // ============================================================================
 // Operator Overloading for IntVar and LinearExpr
 // ============================================================================
@@ -737,11 +763,7 @@ export function createVarProxy(v: IntVar): IntVarWithOps {
     },
     ne: (other: LinearExprLike | number) => {
       const expr = LinearExpr.from(other);
-      return new BoundedLinearExpression(
-        LinearExpr.fromVar(v).sub(expr),
-        -Infinity,
-        -1
-      );
+      return new NotEqualExpression(LinearExpr.fromVar(v).sub(expr), 0);
     },
   });
 }
@@ -754,7 +776,7 @@ export interface IntVarWithOps extends IntVar {
   le(other: LinearExprLike | number): BoundedLinearExpression;
   ge(other: LinearExprLike | number): BoundedLinearExpression;
   eq(other: LinearExprLike | number): BoundedLinearExpression;
-  ne(other: LinearExprLike | number): BoundedLinearExpression;
+  ne(other: LinearExprLike | number): NotEqualExpression;
 }
 
 // ============================================================================
@@ -769,7 +791,11 @@ export interface SolverParameters {
   maxTimeInSeconds?: number;
   /** Enumerate all solutions */
   enumerateAllSolutions?: boolean;
-  /** Number of workers (threads) */
+  /**
+   * Number of workers (threads). Currently a NO-OP: this solver is
+   * single-threaded, so any value is silently ignored. Kept on the interface
+   * for source compatibility with OR-Tools-style call sites.
+   */
   numWorkers?: number;
   /** Log search progress */
   logSearchProgress?: boolean;

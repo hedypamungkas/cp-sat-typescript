@@ -11,6 +11,7 @@ import { LinearExpr, IntVar, BoolVar, IntervalVar, Domain } from './types';
 
 export enum ConstraintType {
   LINEAR = 'LINEAR',
+  NOT_EQUAL = 'NOT_EQUAL',
   ALL_DIFFERENT = 'ALL_DIFFERENT',
   ELEMENT = 'ELEMENT',
   CIRCUIT = 'CIRCUIT',
@@ -111,6 +112,31 @@ export class LinearConstraint extends Constraint {
     }
     const expr = parts.join(' + ').replace(/\+ -/g, '- ') || '0';
     return `LinearConstraint(${this.domain} <= ${expr})`;
+  }
+}
+
+// ============================================================================
+// Not-Equal Constraint
+// ============================================================================
+
+/**
+ * Not-equal constraint: a linear expression must NOT equal a constant value.
+ * Represents `expr != value`. Used by the `.ne()` operator (e.g. `x.ne(5)`
+ * becomes `NotEqualConstraint(x - 5, 0)`). Unlike a single linear inequality,
+ * a disequality can prune a single value from a domain (creating a hole).
+ */
+export class NotEqualConstraint extends Constraint {
+  readonly expr: LinearExpr;
+  readonly value: number;
+
+  constructor(index: number, expr: LinearExpr, value: number, name: string = '') {
+    super(ConstraintType.NOT_EQUAL, index, name);
+    this.expr = expr;
+    this.value = value;
+  }
+
+  toString(): string {
+    return `${this.expr} != ${this.value}`;
   }
 }
 

@@ -13,6 +13,7 @@ import { CpModel } from './model';
 import {
   Constraint,
   LinearConstraint,
+  NotEqualConstraint,
   BoolOrConstraint,
   BoolAndConstraint,
   AtMostOneConstraint,
@@ -66,6 +67,9 @@ export interface DerivedVar {
 function getConstraintVars(constraint: Constraint): IntVar[] {
   if (constraint instanceof LinearConstraint) {
     return constraint.vars;
+  }
+  if (constraint instanceof NotEqualConstraint) {
+    return constraint.expr.vars;
   }
   if (constraint instanceof AllDifferentConstraint) {
     const vars: IntVar[] = [];
@@ -889,12 +893,26 @@ function isConstraintSatisfied(
     }
     case 'AT_MOST_ONE': {
       const ct = constraint as AtMostOneConstraint;
-      // All literals fixed → at most one is true by construction
-      // (presolve already enforced this)
-      return ct.literals.every(lit => {
+      // Satisfied (and safe to drop) only when every literal is fixed AND at
+      // most one of them is true. Counting true literals matters: two literals
+      // fixed to 1 violate the constraint and must NOT be treated as satisfied.
+      let trueCount = 0;
+      for (const lit of ct.literals) {
         const d = domains.get(lit.index);
+        if (!d || d.size !== 1) return false; // not all fixed → keep active
+        if (d.min === 1) trueCount++;
+      }
+      return trueCount <= 1;
+    }
+    case 'NOT_EQUAL': {
+      const ct = constraint as NotEqualConstraint;
+      const allFixed = ct.expr.vars.every(v => {
+        const d = domains.get(v.index);
         return d && d.size === 1;
       });
+      if (!allFixed) return false;
+      const value = ct.expr.evaluate(v => domains.get(v.index)!.min);
+      return value !== ct.value;
     }
     case 'EXACTLY_ONE': {
       const ct = constraint as ExactlyOneConstraint;

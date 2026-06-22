@@ -133,8 +133,10 @@ describe('IntVarImpl', () => {
   it('should support ne comparison', () => {
     const model = new CpModel();
     const x = model.newIntVar(0, 10, 'x');
-    const bounded = x.ne(5);
-    expect(bounded.ub).toBe(-1);
+    const ne = x.ne(5);
+    // x.ne(5) => NotEqualExpression(x - 5, 0): a disequality, not a one-sided bound.
+    expect(ne.value).toBe(0);
+    expect(ne.expr.offset).toBe(-5);
   });
 
   it('should have toString', () => {

@@ -143,7 +143,7 @@ export class IntVarImpl implements IntVarWithOps {
     return createVarProxy(this).eq(other);
   }
 
-  ne(other: import('./types').LinearExprLike | number): import('./types').BoundedLinearExpression {
+  ne(other: import('./types').LinearExprLike | number): import('./types').NotEqualExpression {
     return createVarProxy(this).ne(other);
   }
 
@@ -207,7 +207,7 @@ export class BoolVarImpl implements BoolVar {
     return createVarProxy(this).eq(other);
   }
 
-  ne(other: import('./types').LinearExprLike | number): import('./types').BoundedLinearExpression {
+  ne(other: import('./types').LinearExprLike | number): import('./types').NotEqualExpression {
     return createVarProxy(this).ne(other);
   }
 

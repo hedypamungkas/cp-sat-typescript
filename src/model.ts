@@ -8,6 +8,7 @@ import {
   LinearExpr,
   LinearExprLike,
   BoundedLinearExpression,
+  NotEqualExpression,
   CpSolverStatus,
   VariableSelectionStrategy,
   DomainReductionStrategy,
@@ -24,6 +25,7 @@ import {
 import {
   Constraint,
   LinearConstraint,
+  NotEqualConstraint,
   AllDifferentConstraint,
   ElementConstraint,
   CircuitConstraint,
@@ -438,7 +440,7 @@ export class CpModel {
    * model.add(x.eq(y));
    * ```
    */
-  add(ct: BoundedLinearExpression | boolean): Constraint {
+  add(ct: BoundedLinearExpression | NotEqualExpression | boolean): Constraint {
     if (typeof ct === 'boolean') {
       if (!ct) {
         // Adding false constraint - model will be infeasible
@@ -456,7 +458,23 @@ export class CpModel {
       );
     }
 
+    if (ct instanceof NotEqualExpression) {
+      return this.addNotEqual(ct.expr, ct.value);
+    }
+
     return this.addLinearConstraint(ct.expr, ct.lb, ct.ub);
+  }
+
+  /**
+   * Add a not-equal constraint: expr != value.
+   * Reached via the `.ne()` operator, e.g. `model.add(x.ne(5))`.
+   * Unlike a linear inequality, this prunes a single value from a domain.
+   */
+  addNotEqual(expr: LinearExpr, value: number): NotEqualConstraint {
+    const index = this._constraints.length;
+    const constraint = new NotEqualConstraint(index, expr, value);
+    this._constraints.push(constraint);
+    return constraint;
   }
 
   /**
@@ -630,7 +648,7 @@ export class CpModel {
     finalStates: number[],
     transitionTriples: [number, number, number][]
   ): AutomatonConstraint {
-    console.warn('AUTOMATON constraint is not yet implemented — solutions may not be verified against this constraint');
+    console.warn('AUTOMATON: DFA solution-checking is implemented, but constraint propagation is not — search may be slow on automaton-heavy models.');
     const index = this._constraints.length;
     const constraint = new AutomatonConstraint(
       index,

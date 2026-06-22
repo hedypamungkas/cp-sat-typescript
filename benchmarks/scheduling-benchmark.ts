@@ -2,7 +2,7 @@
  * Scheduling Propagation Impact Benchmark
  *
  * Measures solver stats (branches, conflicts, time) for NoOverlap and Cumulative
- * problems at increasing sizes. This establishes the baseline WITHOUT propagation.
+ * problems at increasing sizes, using full constraint propagation.
  */
 
 import { CpModel } from '../src/model';

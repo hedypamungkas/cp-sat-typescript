@@ -795,13 +795,30 @@ describe('Constraints - edge cases', () => {
       expect([CpSolverStatus.OPTIMAL, CpSolverStatus.FEASIBLE]).toContain(status);
     });
 
-    it('should throw for AUTOMATON constraint', () => {
+    it('verifies AUTOMATON constraint via DFA check (no longer throws)', () => {
       const model = new CpModel();
       const x = model.newIntVar(0, 1, 'x');
+      // DFA: state 0 --0--> 0, state 0 --1--> 1; start 0, final {0,1}. Accepts {0,1}.
       model.addAutomaton([x], 0, [0, 1], [[0, 0, 0], [0, 1, 1]]);
 
       const solver = new CpSolver();
-      expect(() => solver.solve(model)).toThrow('not yet implemented');
+      const status = solver.solve(model);
+      expect([CpSolverStatus.OPTIMAL, CpSolverStatus.FEASIBLE]).toContain(status);
+      expect([0, 1]).toContain(solver.value(x));
+    });
+
+    it('AUTOMATON checker rejects words not accepted by the DFA', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 1, 'x');
+      const y = model.newIntVar(0, 1, 'y');
+      // DFA accepting only the word "0,1": 0 --0--> 1, 1 --1--> 2 (final).
+      model.addAutomaton([x, y], 0, [2], [[0, 1, 0], [1, 2, 1]]);
+
+      const solver = new CpSolver();
+      const status = solver.solve(model);
+      expect([CpSolverStatus.OPTIMAL, CpSolverStatus.FEASIBLE]).toContain(status);
+      expect(solver.value(x)).toBe(0);
+      expect(solver.value(y)).toBe(1);
     });
 
     it('should solve MAP_DOMAIN constraint', () => {

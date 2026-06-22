@@ -517,10 +517,12 @@ describe('LinearExpr - additional coverage', () => {
       expect(bounded.ub).toBe(0);
     });
 
-    it('should create ne bounded expression', () => {
+    it('should create ne not-equal expression', () => {
       const expr = new LinearExpr([x], [1], 0);
-      const bounded = expr.ne(5);
-      expect(bounded.ub).toBe(-1);
+      const ne = expr.ne(5);
+      // expr.ne(5) => NotEqualExpression(expr - 5, 0).
+      expect(ne.value).toBe(0);
+      expect(ne.expr.offset).toBe(-5);
     });
 
     it('should create le with another expression', () => {

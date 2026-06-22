@@ -353,59 +353,64 @@ export function propagateCumulativeTimeTable(
 
   let changed = false;
 
-  // Build profile from mandatory parts of present tasks
-  const events: ProfileEvent[] = [];
-  for (const task of tasks) {
-    if (task.bounds.presenceState === 'absent') continue;
-    // Mandatory part: [startMax, endMin)
-    const mpStart = task.bounds.startMax;
-    const mpEnd = task.bounds.endMin;
-    if (mpStart < mpEnd) {
-      events.push({ time: mpStart, delta: task.demandMin });
-      events.push({ time: mpEnd, delta: -task.demandMin });
+  // Build the mandatory-part time-table profile, optionally excluding one task.
+  // The overload check uses the FULL profile; per-task placement uses a profile
+  // EXCLUDING that task, so a task is never counted as conflicting with its own
+  // mandatory part (which caused false INFEASIBLE — see the
+  // propagateCumulativeTimeTable property test).
+  const buildProfile = (excludeIdx: number): { time: number; height: number }[] => {
+    const events: ProfileEvent[] = [];
+    tasks.forEach((task, idx) => {
+      if (idx === excludeIdx) return;
+      if (task.bounds.presenceState === 'absent') return;
+      // Mandatory part: [startMax, endMin)
+      const mpStart = task.bounds.startMax;
+      const mpEnd = task.bounds.endMin;
+      if (mpStart < mpEnd) {
+        events.push({ time: mpStart, delta: task.demandMin });
+        events.push({ time: mpEnd, delta: -task.demandMin });
+      }
+    });
+    if (events.length === 0) return [];
+    // Sort: by time, start events before end events at the same time point.
+    events.sort((a, b) => a.time - b.time || (b.delta - a.delta));
+    const profile: { time: number; height: number }[] = [];
+    let height = 0;
+    for (const event of events) {
+      if (profile.length === 0 || event.time !== profile[profile.length - 1].time) {
+        profile.push({ time: event.time, height });
+      }
+      height += event.delta;
+      profile[profile.length - 1].height = height;
     }
-  }
+    return profile;
+  };
 
-  if (events.length === 0) return 'CONSISTENT';
-
-  // Sort: by time, start events before end events at same time
-  // (positive delta before negative delta at same time point)
-  events.sort((a, b) => a.time - b.time || (b.delta - a.delta));
-
-  // Sweep to build profile
-  const profile: { time: number; height: number }[] = [];
-  let height = 0;
-
-  for (const event of events) {
-    if (profile.length === 0 || event.time !== profile[profile.length - 1].time) {
-      profile.push({ time: event.time, height });
-    }
-    height += event.delta;
-    profile[profile.length - 1].height = height;
-  }
-
-  // Overload detection
+  // Overload detection uses the FULL profile (all mandatory parts).
+  const profile = buildProfile(-1);
   for (const rect of profile) {
     if (rect.height > capacityMax) {
       return 'INFEASIBLE';
     }
   }
+  if (profile.length === 0) return 'CONSISTENT';
 
-  // Forward sweep — prune startMin for unfixed tasks only
-  // Fixed tasks are already in the profile, so checking them would double-count
-  for (const task of tasks) {
+  // Forward sweep — prune startMin for unfixed tasks. Use a profile excluding
+  // the task itself so its own mandatory part is not a self-conflict.
+  for (let ti = 0; ti < tasks.length; ti++) {
+    const task = tasks[ti];
     if (task.bounds.presenceState === 'absent') continue;
     if (task.demandMin >= capacityMax) continue;
-    // Skip fixed tasks — they're already in the profile
+    // Skip fixed tasks — their mandatory part is already fixed in place.
     if (task.bounds.startMin === task.bounds.startMax) continue;
 
-    // conflictHeight: max profile height where task can still fit
+    const othersProfile = buildProfile(ti);
     const conflictHeight = capacityMax - task.demandMin;
     let newStartMin = task.bounds.startMin;
 
-    for (let i = 0; i < profile.length - 1; i++) {
-      const rect = profile[i];
-      const nextRect = profile[i + 1];
+    for (let i = 0; i < othersProfile.length - 1; i++) {
+      const rect = othersProfile[i];
+      const nextRect = othersProfile[i + 1];
 
       if (rect.time >= task.bounds.endMin) break;
       if (rect.height <= conflictHeight) continue;
@@ -427,16 +432,16 @@ export function propagateCumulativeTimeTable(
     }
   }
 
-  // Backward sweep — prune endMax for unfixed tasks only
-  const reversedProfile = profile
-    .map(r => ({ time: -r.time, height: r.height }))
-    .reverse();
-
-  for (const task of tasks) {
+  // Backward sweep — prune endMax for unfixed tasks (profile excludes the task).
+  for (let ti = 0; ti < tasks.length; ti++) {
+    const task = tasks[ti];
     if (task.bounds.presenceState === 'absent') continue;
     if (task.demandMin >= capacityMax) continue;
-    // Skip fixed tasks — they're already in the profile
     if (task.bounds.startMin === task.bounds.startMax) continue;
+
+    const reversedProfile = buildProfile(ti)
+      .map(r => ({ time: -r.time, height: r.height }))
+      .reverse();
 
     const conflictHeight = capacityMax - task.demandMin;
     const negEndMax = -task.bounds.endMax;
@@ -593,21 +598,25 @@ export function propagateNoOverlapNotLast(
 
       // If others pack past task's startMax → task cannot be last
       if (packEnd > task.startMax) {
-        // Find the latest endMin among tasks that could precede this one
-        let latestPredecessorEnd = -Infinity;
+        // Not-last bound: if the task cannot be last, it must end before the
+        // start of the task that DOES come last. The sound upper bound on
+        // endMax(task) is therefore max(startMax) of the other tasks (their
+        // latest start). Using endMin (earliest end) here over-tightens and is
+        // unsound — see the propagateNoOverlapNotLast property test.
+        let latestFollowingStart = -Infinity;
         for (const t of others) {
-          if (t.endMin > latestPredecessorEnd) {
-            latestPredecessorEnd = t.endMin;
+          if (t.startMax > latestFollowingStart) {
+            latestFollowingStart = t.startMax;
           }
         }
 
-        if (latestPredecessorEnd === -Infinity) {
+        if (latestFollowingStart === -Infinity) {
           return 'INFEASIBLE';
         }
 
         // Decrease endMax of task
         try {
-          if (tightenEndMax(task, latestPredecessorEnd, domains, propagateLinear)) {
+          if (tightenEndMax(task, latestFollowingStart, domains, propagateLinear)) {
             changed = true;
           }
         } catch {
@@ -621,107 +630,31 @@ export function propagateNoOverlapNotLast(
 }
 
 // ============================================================================
-// Phase 3: Theta Tree
+// (Theta tree removed.) The edge-finding propagators below use direct loops
+// over scheduling windows — sound, but O(n^2)/O(n^3) rather than O(n log n).
+// A real Θ-tree would be a strength improvement, not a correctness one; it was
+// previously dead code that was never instantiated.
 // ============================================================================
-
-/**
- * Theta tree for efficient energy computation in edge-finding.
- *
- * Maintains a segment tree where each leaf represents a task sorted by startMin.
- * Internal nodes store:
- * - energy: total energy (sum of children's energy)
- * - envelope: max energy in any suffix of the subtree
- *
- * The envelope captures: for the tasks in this subtree sorted by startMin,
- * what is the maximum total energy of any suffix?
- */
-export class ThetaTree {
-  private _n: number;
-  private _size: number;
-  private _energy: number[];
-  private _envelope: number[];
-
-  constructor(n: number) {
-    this._n = 1;
-    while (this._n < n) this._n *= 2;
-    this._size = 2 * this._n;
-    this._energy = new Array(this._size).fill(0);
-    this._envelope = new Array(this._size).fill(0);
-  }
-
-  /**
-   * Update a leaf node with task energy.
-   * i is 0-based leaf index.
-   */
-  update(i: number, energy: number): void {
-    const leaf = i + this._n;
-    this._energy[leaf] = energy;
-    this._envelope[leaf] = energy;
-    this._recalcUp(leaf);
-  }
-
-  /**
-   * Remove a task at position i (set energy to 0).
-   */
-  remove(i: number): void {
-    this.update(i, 0);
-  }
-
-  /**
-   * Get the maximum envelope across the entire tree.
-   * For NoOverlap: this is the max total size of any suffix of tasks.
-   */
-  getEnvelope(): number {
-    return this._envelope[1];
-  }
-
-  /**
-   * Get total energy of all tasks in the tree.
-   */
-  getTotalEnergy(): number {
-    return this._energy[1];
-  }
-
-  /**
-   * Reset all nodes to zero.
-   */
-  reset(): void {
-    this._energy.fill(0);
-    this._envelope.fill(0);
-  }
-
-  private _recalcUp(leaf: number): void {
-    let node = Math.floor(leaf / 2);
-    while (node >= 1) {
-      this._recalc(node);
-      node = Math.floor(node / 2);
-    }
-  }
-
-  private _recalc(node: number): void {
-    const left = 2 * node;
-    const right = 2 * node + 1;
-
-    this._energy[node] = this._energy[left] + this._energy[right];
-    this._envelope[node] = Math.max(
-      this._envelope[left],
-      this._envelope[right] + this._energy[left]
-    );
-  }
-}
 
 // ============================================================================
 // Phase 3: Edge-Finding (Disjunctive)
 // ============================================================================
 
 /**
- * Edge-finding for NoOverlap using Theta Tree.
+ * Edge-finding for NoOverlap (disjunctive), Baptiste-Le Pape-Nuijten / Vilím.
  *
- * For each contiguous window, check if the total mandatory energy (sum of sizes)
- * exceeds the window duration. If so, the window is infeasible.
+ * est = startMin, lct = endMax (latest completion), p = sizeMin. NOTE: lct is
+ * endMax throughout — a previous attempt used endMin and was unsound (over-pruned);
+ * see the propagateNoOverlapEdgeFinding property test.
  *
- * For each task in the window, if removing it makes the remaining energy fit,
- * then the task must start after the remaining tasks finish.
+ * 1. Overload: for a prefix Ω (tasks sorted by lct), if est(Ω) + p(Ω) > lct(Ω)
+ *    the present tasks cannot all fit → INFEASIBLE.
+ * 2. Edge-finding (start update): for task i and Ω ⊆ T\{i}, if
+ *    est(Ω∪{i}) + p(Ω∪{i}) > lct(Ω) then i cannot run after all of Ω, so
+ *    est_i ← max(est_i, est(Ω) + p(Ω)).
+ *
+ * Only definitely-present tasks participate (a 'maybe' task may not execute, so
+ * its size is not mandatory). O(n²), single pass.
  */
 export function propagateNoOverlapEdgeFinding(
   ct: NoOverlapConstraint,
@@ -735,54 +668,61 @@ export function propagateNoOverlapEdgeFinding(
     tasks.push(bounds);
   }
 
-  const activeTasks = tasks.filter(t => t.presenceState !== 'absent');
-  if (activeTasks.length <= 2) return 'CONSISTENT';
+  // Reason only about definitely-present tasks (soundness w.r.t. optional
+  // intervals): a 'maybe' task may not execute, so its size is not mandatory.
+  const present = tasks.filter(t => t.presenceState === 'present');
+  if (present.length <= 1) return 'CONSISTENT';
+
+  // Sort by lct = endMax ascending.
+  const byLct = [...present].sort((a, b) => a.endMax - b.endMax);
 
   let changed = false;
 
-  // Build contiguous windows
-  const windows = buildContiguousWindows(activeTasks);
+  // ---- Overload detection: for each prefix Ω (ascending lct), if
+  // est(Ω) + p(Ω) > lct(Ω) the tasks cannot all fit → INFEASIBLE. ----
+  {
+    let estMin = Infinity;
+    let pSum = 0;
+    for (const task of byLct) {
+      estMin = Math.min(estMin, task.startMin);
+      pSum += task.sizeMin;
+      if (estMin + pSum > task.endMax) {
+        return 'INFEASIBLE';
+      }
+    }
+  }
 
-  for (const window of windows) {
-    if (window.length <= 2) continue;
+  // ---- Edge-finding: start-time update. For each task i, sweep prefixes Ω of
+  // (T \ {i}) by ascending lct; when est(Ω ∪ {i}) + p(Ω ∪ {i}) > lct(Ω), i
+  // cannot be scheduled after all of Ω, so est_i ≥ est(Ω) + p(Ω). ----
+  for (let i = 0; i < byLct.length; i++) {
+    const taskI = byLct[i];
+    const estI = taskI.startMin;
+    const pI = taskI.sizeMin;
 
-    // Compute window bounds
-    const windowStart = Math.min(...window.map(t => t.startMin));
-    const windowEnd = Math.max(...window.map(t => t.endMax));
-    const windowSize = windowEnd - windowStart;
-
-    // Compute total mandatory energy (sum of sizes)
-    let totalEnergy = 0;
-    for (const task of window) {
-      totalEnergy += task.sizeMin;
+    let bestBound = estI;
+    let estMinPref = Infinity;
+    let pPref = 0;
+    for (let k = 0; k < byLct.length; k++) {
+      if (k === i) continue;
+      const j = byLct[k];
+      estMinPref = Math.min(estMinPref, j.startMin);
+      pPref += j.sizeMin;
+      const lctOmega = j.endMax;
+      // Qualifying: est(Ω ∪ {i}) + p(Ω ∪ {i}) > lct(Ω)?
+      if (Math.min(estMinPref, estI) + (pPref + pI) > lctOmega) {
+        const cand = estMinPref + pPref;
+        if (cand > bestBound) bestBound = cand;
+      }
     }
 
-    // If total energy exceeds window size → INFEASIBLE
-    if (totalEnergy > windowSize) {
-      return 'INFEASIBLE';
-    }
-
-    // For each task, check if removing it makes the rest fit
-    // If so, the task can be "gray" and must start after the mandatory envelope
-    for (const task of window) {
-      const otherEnergy = totalEnergy - task.sizeMin;
-
-      // If other tasks' energy exceeds the window without this task,
-      // this task must be scheduled after the others
-      if (otherEnergy > windowSize - task.sizeMin) {
-        // The other tasks fill the window — this task must start after them
-        // Push startMin to windowStart + otherEnergy
-        const newStartMin = windowStart + otherEnergy;
-
-        if (newStartMin > task.startMin) {
-          try {
-            if (tightenStartMin(task, newStartMin, domains, propagateLinear)) {
-              changed = true;
-            }
-          } catch {
-            return 'INFEASIBLE';
-          }
+    if (bestBound > estI) {
+      try {
+        if (tightenStartMin(taskI, bestBound, domains, propagateLinear)) {
+          changed = true;
         }
+      } catch {
+        return 'INFEASIBLE';
       }
     }
   }
@@ -987,7 +927,7 @@ export function propagateReservoir(
     }
   }
 
-  // ---- Time domain tightening via forward sweep ----
+  // ---- Time domain tightening via forward + backward sweeps ----
 
   // Helper: tighten timeMin of a time expression (time >= newMin)
   function tightenTimeMin(expr: LinearExpr, newMin: number): boolean {
@@ -1057,11 +997,16 @@ export function propagateReservoir(
         // else: definitely not yet → contributes 0
       }
 
-      // Overflow: levelMin > maxLevel → push positive tentative events later
-      if (levelMin > ct.maxLevel && nextTime !== undefined) {
-        // Only push events that are NOT yet definite and have positive deltaMin
+      // Overflow: a positive tentative event ev, if it occurred by t, would
+      // force the minimum level above maxLevel (levelMin already excludes ev's
+      // delta since it is tentative) → ev must occur after t.
+      // NOTE: the previous `levelMin > maxLevel` guard was unreachable (identical
+      // to the feasibility scan above); the per-event `+ ev.deltaMin` term is the
+      // fix that makes this actually tighten.
+      if (nextTime !== undefined) {
         for (const ev of activeEvents) {
-          if (ev.timeMin <= t && ev.timeMax > t && ev.deltaMin > 0) {
+          if (ev.timeMin <= t && ev.timeMax > t && ev.deltaMin > 0
+            && levelMin + ev.deltaMin > ct.maxLevel) {
             try {
               if (tightenTimeMin(ct.times[ev.index], nextTime)) changed = true;
             } catch {
@@ -1071,15 +1016,40 @@ export function propagateReservoir(
         }
       }
 
-      // Underflow: levelMax < minLevel → push negative tentative events later
-      if (levelMax < ct.minLevel && nextTime !== undefined) {
+      // Underflow: a negative tentative event ev, if it occurred by t, would
+      // force the maximum level below minLevel → ev must occur after t.
+      if (nextTime !== undefined) {
         for (const ev of activeEvents) {
-          if (ev.timeMin <= t && ev.timeMax > t && ev.deltaMax < 0) {
+          if (ev.timeMin <= t && ev.timeMax > t && ev.deltaMax < 0
+            && levelMax + ev.deltaMax < ct.minLevel) {
             try {
               if (tightenTimeMin(ct.times[ev.index], nextTime)) changed = true;
             } catch {
               return 'INFEASIBLE';
             }
+          }
+        }
+      }
+
+      // Backward: ev must be <= t (tighten timeMax to t) if excluding ev from
+      // the prefix at t (ev > t) would violate a bound. Symmetric to the
+      // forward checks above but subtracting ev's tentative contribution.
+      for (const ev of activeEvents) {
+        if (!(ev.timeMin <= t && ev.timeMax > t)) continue; // tentative at t
+        // Positive ev excluded → lower max level → underflow → ev must be <= t.
+        if (ev.deltaMax > 0 && levelMax - ev.deltaMax < ct.minLevel) {
+          try {
+            if (tightenTimeMax(ct.times[ev.index], t)) changed = true;
+          } catch {
+            return 'INFEASIBLE';
+          }
+        }
+        // Negative ev excluded → higher min level → overflow → ev must be <= t.
+        if (ev.deltaMin < 0 && levelMin - ev.deltaMin > ct.maxLevel) {
+          try {
+            if (tightenTimeMax(ct.times[ev.index], t)) changed = true;
+          } catch {
+            return 'INFEASIBLE';
           }
         }
       }

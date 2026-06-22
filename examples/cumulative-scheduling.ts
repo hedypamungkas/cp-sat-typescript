@@ -9,9 +9,8 @@
  * With scheduling propagation enabled, the solver efficiently prunes
  * infeasible start times using Time-Table and Edge-Finding algorithms.
  *
- * Performance comparison (5 tasks, domain [0,10]):
- *   Before propagation: ~4,438 branches
- *   After propagation:  ~10 branches (440x reduction)
+ * Performance: the actual search-tree size is measured at runtime via
+ * solver.numBranches (printed below) — no hardcoded branch-count claims.
  */
 
 import { CpModel, CpSolver, CpSolverStatus, IntVarImpl, IntervalVarImpl } from '../src';
@@ -123,8 +122,8 @@ function solveCumulativeScheduling() {
 
 function solveCumulativeFeasibility() {
   console.log('\n\n=== Cumulative Feasibility (4 tasks, domain [0,10]) ===\n');
-  console.log('Before propagation: ~4,436 branches.');
-  console.log('With propagation: ~8 branches.\n');
+  // Actual branch count is reported from solver.numBranches after solving
+  // (replaces previously hardcoded, unverifiable "before/after" numbers).
 
   const model = new CpModel();
   const intervals = [];

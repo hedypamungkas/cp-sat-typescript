@@ -120,7 +120,6 @@ export {
   propagateReservoir,
   checkReservoir,
   computeIntervalBounds,
-  ThetaTree,
   PropagationResult,
   IntervalBounds,
   LinearPropagateFn,

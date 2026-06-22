@@ -8,6 +8,7 @@ import { IntVarImpl, BoolVarImpl, IntervalVarImpl } from './variables';
 import {
   Constraint,
   LinearConstraint,
+  NotEqualConstraint,
   AllDifferentConstraint,
   BoolOrConstraint,
   BoolAndConstraint,
@@ -179,8 +180,21 @@ export class SolverEngine {
       return CpSolverStatus.INFEASIBLE;
     }
 
+    // Note: _runPresolve has already populated this._activeConstraints.
     if (presolveResult.status === 'OPTIMAL') {
-      // All variables fixed during presolve — extract solution
+      // All variables fixed during presolve. Independently verify the candidate
+      // against the active constraints before trusting it: presolve and the
+      // checkers are separate code paths, and a disagreement must not silently
+      // yield a wrong OPTIMAL answer.
+      if (!this._checkAllConstraints(presolveResult.domains)) {
+        console.warn(
+          'cp-sat-ts: presolve reported OPTIMAL but independent checkers ' +
+          'rejected the candidate. Treating as INFEASIBLE (this signals a ' +
+          'propagation/presolve inconsistency).'
+        );
+        this._stats.wallTime = (Date.now() - this._startTime) / 1000;
+        return CpSolverStatus.INFEASIBLE;
+      }
       this._solution = this._extractSolution(presolveResult.domains);
       this._stats.wallTime = (Date.now() - this._startTime) / 1000;
       return CpSolverStatus.OPTIMAL;
@@ -573,6 +587,8 @@ export class SolverEngine {
     switch (constraint.type) {
       case 'LINEAR':
         return this._checkLinear(constraint as LinearConstraint, domains);
+      case 'NOT_EQUAL':
+        return this._checkNotEqual(constraint as NotEqualConstraint, domains);
       case 'ALL_DIFFERENT':
         return this._checkAllDifferent(constraint as AllDifferentConstraint, domains);
       case 'BOOL_OR':
@@ -624,11 +640,7 @@ export class SolverEngine {
         // The decomposed constraints handle verification
         return true;
       case 'AUTOMATON':
-        throw new Error(
-          `${constraint.type} constraint is not yet implemented. ` +
-          `Solutions cannot be verified against this constraint. ` +
-          `Remove it from the model or implement the constraint checker.`
-        );
+        return this._checkAutomaton(constraint as AutomatonConstraint, domains);
       default:
         return true;
     }
@@ -637,6 +649,30 @@ export class SolverEngine {
   // ============================================================================
   // Constraint Checking (solution verification)
   // ============================================================================
+
+  /**
+   * Check Automaton: simulate the DFA over the fixed variable word and verify
+   * it ends in an accepting state. Replaces a former mid-solve throw.
+   * Assumes a deterministic automaton (OR-Tools automata are deterministic).
+   */
+  private _checkAutomaton(ct: AutomatonConstraint, domains: Map<number, Domain>): boolean {
+    let state = ct.startingState;
+    for (const v of ct.vars) {
+      const d = domains.get(v.index);
+      if (!d || d.size !== 1) return false; // not fully fixed at this leaf
+      const label = d.min;
+      let next = -1;
+      for (let i = 0; i < ct.transitionTail.length; i++) {
+        if (ct.transitionTail[i] === state && ct.transitionLabel[i] === label) {
+          next = ct.transitionHead[i];
+          break;
+        }
+      }
+      if (next === -1) return false; // no transition for this label → rejected
+      state = next;
+    }
+    return ct.finalStates.includes(state);
+  }
 
   private _checkLinear(ct: LinearConstraint, domains: Map<number, Domain>): boolean {
     const { vars, coeffs, domain: bounds } = ct;
@@ -1013,11 +1049,22 @@ export class SolverEngine {
   private _propagate(domains: Map<number, Domain>): boolean {
     let changed = true;
     let iterations = 0;
-    const maxIterations = 100;
+    // Safety ceiling only: a correct (monotonic) fixpoint converges well below
+    // this. If it is ever hit, propagation is stopped early AND a warning is
+    // emitted — never silently. Hitting it signals non-monotonic propagators
+    // that should be fixed, not a "consistent" result to trust.
+    const maxIterations = 1000;
 
-    while (changed && iterations < maxIterations) {
+    while (changed) {
       changed = false;
       iterations++;
+      if (iterations > maxIterations) {
+        console.warn(
+          `cp-sat-ts: propagation fixpoint exceeded ${maxIterations} iterations; ` +
+          'stopping early. This indicates non-monotonic propagators.'
+        );
+        break;
+      }
 
       for (let i = 0; i < this._model.constraints.length; i++) {
         // Skip inactive constraints (removed during presolve)
@@ -1034,7 +1081,7 @@ export class SolverEngine {
       }
 
       // Check for empty domains
-      for (const [index, domain] of domains) {
+      for (const [_index, domain] of domains) {
         if (domain.isEmpty) return false;
       }
     }
@@ -1054,6 +1101,8 @@ export class SolverEngine {
     switch (constraint.type) {
       case 'LINEAR':
         return this._propagateLinear(constraint as LinearConstraint, domains);
+      case 'NOT_EQUAL':
+        return this._propagateNotEqual(constraint as NotEqualConstraint, domains);
       case 'ALL_DIFFERENT':
         return this._propagateAllDifferent(constraint as AllDifferentConstraint, domains);
       case 'BOOL_OR':
@@ -1208,6 +1257,65 @@ export class SolverEngine {
     }
 
     return changed ? 'CHANGED' : 'CONSISTENT';
+  }
+
+  /**
+   * Propagate NotEqual: expr != value.
+   *
+   * For each variable, when ALL other variables in the expression are fixed,
+   * the expression becomes affine in that variable, and the single value that
+   * would make it equal `value` can be removed. This is sound — it only removes
+   * values that are genuinely infeasible — and covers x != c (immediately) and
+   * x != y once one side is fixed.
+   */
+  private _propagateNotEqual(ct: NotEqualConstraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
+    const { vars, coeffs, offset } = ct.expr;
+    let changed = false;
+
+    for (let i = 0; i < vars.length; i++) {
+      const c = coeffs[i];
+      if (c === 0) continue;
+
+      // Sum of the other (fixed) terms + offset; skip if any other var is unfixed.
+      let othersFixed = true;
+      let othersSum = offset;
+      for (let j = 0; j < vars.length; j++) {
+        if (j === i) continue;
+        const dj = domains.get(vars[j].index);
+        if (!dj || dj.isEmpty) return 'INFEASIBLE';
+        if (dj.size !== 1) {
+          othersFixed = false;
+          break;
+        }
+        othersSum += coeffs[j] * dj.min;
+      }
+      if (!othersFixed) continue;
+
+      // expr == value  <=>  c * x_i + othersSum == value  <=>  x_i == (value - othersSum) / c
+      const numerator = ct.value - othersSum;
+      if (numerator % c !== 0) continue; // forbidden value is non-integer → irrelevant
+      const forbidden = numerator / c;
+
+      const d = domains.get(vars[i].index);
+      if (!d || d.isEmpty) return 'INFEASIBLE';
+      if (d.contains(forbidden)) {
+        const newDomain = d.removeValue(forbidden);
+        if (newDomain.isEmpty) return 'INFEASIBLE';
+        domains.set(vars[i].index, newDomain);
+        this._stats.numIntegerPropagations++;
+        changed = true;
+      }
+    }
+
+    return changed ? 'CHANGED' : 'CONSISTENT';
+  }
+
+  /**
+   * Check NotEqual at a complete solution: evaluate expr, ensure != value.
+   */
+  private _checkNotEqual(ct: NotEqualConstraint, domains: Map<number, Domain>): boolean {
+    const value = ct.expr.evaluate(v => domains.get(v.index)!.min);
+    return value !== ct.value;
   }
 
   /**
