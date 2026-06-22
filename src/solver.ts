@@ -7,7 +7,7 @@ import { LinearExpr, CpSolverStatus, SolverParameters, SolverStatistics } from '
 import { IntVarImpl, BoolVarImpl } from './variables';
 import { CpModel } from './model';
 import { SolverEngine, SolverStats } from './solver-engine';
-import { CpSolverSolutionCallback } from './callback';
+import { CpSolverSolutionCallback, SearchProgressCallback } from './callback';
 
 // ============================================================================
 // CpSolver Class
@@ -88,7 +88,7 @@ export class CpSolver {
    * }
    * ```
    */
-  solve(model: CpModel, callback?: CpSolverSolutionCallback): CpSolverStatus {
+  solve(model: CpModel, callback?: CpSolverSolutionCallback, progressCallback?: SearchProgressCallback): CpSolverStatus {
     // Create solver engine
     this._engine = new SolverEngine(model, this._parameters);
 
@@ -141,7 +141,7 @@ export class CpSolver {
     }
 
     // Solve
-    this._status = this._engine.solve(engineCallback);
+    this._status = this._engine.solve(engineCallback, progressCallback);
 
     // Extract results
     if (this._status === CpSolverStatus.OPTIMAL || this._status === CpSolverStatus.FEASIBLE) {
@@ -352,8 +352,8 @@ export class CpSolver {
    * @returns Array of assumption indices that caused infeasibility
    */
   sufficientAssumptionsForInfeasibility(): number[] {
-    // TODO: Implement assumption tracking
-    return [];
+    if (!this._engine) return [];
+    return this._engine.sufficientAssumptionsForInfeasibility();
   }
 
   /**

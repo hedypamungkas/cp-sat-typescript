@@ -18,6 +18,12 @@ export {
   BoundedLinearExpression,
   SolverParameters,
   SolverStatistics,
+  SearchProgressInfo,
+  ModelJSON,
+  VariableData,
+  IntervalVarData,
+  ConstraintData,
+  DecisionStrategyData,
   IntVar,
   BoolVar,
   IntervalVar,
@@ -92,6 +98,7 @@ export {
   VarArraySolutionPrinter,
   VarArrayAndObjectiveSolutionPrinter,
   ObjectiveSolutionPrinter,
+  SearchProgressCallback,
 } from './callback';
 
 // ============================================================================
@@ -144,6 +151,14 @@ export {
   propagateNoOverlap2D,
   checkNoOverlap2D,
 } from './nooverlap2d-propagation';
+
+// ============================================================================
+// Automaton Propagation
+// ============================================================================
+
+export {
+  propagateAutomaton,
+} from './automaton-propagation';
 
 // ============================================================================
 // Version

@@ -3,8 +3,8 @@
  * Solver Engine - Backtracking search with constraint propagation and branch-and-bound
  */
 
-import { Domain, LinearExpr, CpSolverStatus, BoolVar, IntVar, SolverParameters } from './types';
-import { TrailMap } from './trail';
+import { Domain, LinearExpr, CpSolverStatus, BoolVar, IntVar, SolverParameters, SearchProgressInfo, Reason } from './types';
+import { TrailMap, ReasonTrail } from './trail';
 import { IntVarImpl, BoolVarImpl, IntervalVarImpl } from './variables';
 import {
   Constraint,
@@ -37,6 +37,7 @@ import {
   AutomatonConstraint,
 } from './constraints';
 import { CpModel } from './model';
+import type { SearchProgressCallback } from './callback';
 import { presolveModel, computeDerivedValue, DerivedVar } from './presolve';
 import {
   propagateNoOverlap,
@@ -60,6 +61,7 @@ import {
   propagateNoOverlap2D,
   checkNoOverlap2D,
 } from './nooverlap2d-propagation';
+import { propagateAutomaton } from './automaton-propagation';
 
 // ============================================================================
 // Solver Statistics
@@ -116,6 +118,15 @@ export class SolverEngine {
   private _activeConstraints: Set<number> | null = null;
   private _derivedVars: Map<number, DerivedVar> | null = null;
 
+  // Reason tracking for UNSAT core extraction
+  private _reasonTrail: ReasonTrail = new ReasonTrail();
+  private _infeasibleAfterAssumptions: boolean = false;
+
+  // Search progress reporting
+  private _progressCallback: SearchProgressCallback | null = null;
+  private _lastLogTime: number = 0;
+  private static readonly _LOG_INTERVAL_MS = 1000;
+
   constructor(model: CpModel, parameters: SolverParameters = {}) {
     this._model = model;
     this._parameters = parameters;
@@ -143,10 +154,14 @@ export class SolverEngine {
   /**
    * Solve the model
    */
-  solve(callback?: SolutionCallback): CpSolverStatus {
+  solve(callback?: SolutionCallback, progressCallback?: SearchProgressCallback): CpSolverStatus {
     this._callback = callback || null;
+    this._progressCallback = progressCallback || null;
     this._startTime = Date.now();
+    this._lastLogTime = 0;
     this._stopped = false;
+    this._reasonTrail = new ReasonTrail();
+    this._infeasibleAfterAssumptions = false;
     this._solution = null;
     this._allSolutions = [];
     this._bestObjective = null;
@@ -293,12 +308,19 @@ export class SolverEngine {
    * encoded literals (a future API change).
    */
   private _applyAssumptions(domains: Map<number, Domain>): boolean {
-    for (const lit of this._model.assumptions) {
+    for (let i = 0; i < this._model.assumptions.length; i++) {
+      const lit = this._model.assumptions[i];
       const domain = domains.get(lit.index);
       if (!domain) continue;
-      if (!domain.contains(1)) return false; // assumed true but forced false
+      if (!domain.contains(1)) {
+        // Assumption contradicts current domain — record reason for core extraction
+        this._reasonTrail.setReason(lit.index, { type: 'assumption', assumptionIndex: i });
+        this._infeasibleAfterAssumptions = true;
+        return false;
+      }
       if (domain.min !== 1 || domain.max !== 1) {
         domains.set(lit.index, domain.fixValue(1));
+        this._reasonTrail.setReason(lit.index, { type: 'assumption', assumptionIndex: i });
       }
     }
     return true;
@@ -355,6 +377,9 @@ export class SolverEngine {
       return this._solution ? CpSolverStatus.FEASIBLE : CpSolverStatus.UNKNOWN;
     }
 
+    // Report search progress (throttled by wall-clock time)
+    this._maybeLogProgress(depth, domains);
+
     // Branch-and-bound: prune if we can't improve on incumbent
     if (this._hasObjective && !this._canImprove(domains)) {
       this._stats.numConflicts++;
@@ -365,6 +390,7 @@ export class SolverEngine {
     // and the try/finally restores them on EVERY return path — replacing the
     // former per-node domain clone (and the per-value clone below).
     domains.pushLevel();
+    this._reasonTrail.pushLevel();
     try {
       // Update derived variables' domains from base variable domains
       this._updateDerivedDomains(domains);
@@ -458,6 +484,7 @@ export class SolverEngine {
         this._stats.numBranches++;
 
         domains.pushLevel();
+        this._reasonTrail.pushLevel();
         try {
           // Fix this variable to the value and recurse.
           domains.set(varIndex, new Domain([value, value]));
@@ -470,6 +497,7 @@ export class SolverEngine {
             // Continue searching for better solutions or more solutions
           }
         } finally {
+          this._reasonTrail.popLevel();
           domains.popLevel();
         }
       }
@@ -481,6 +509,7 @@ export class SolverEngine {
 
       return CpSolverStatus.INFEASIBLE;
     } finally {
+      this._reasonTrail.popLevel();
       domains.popLevel();
     }
   }
@@ -591,6 +620,49 @@ export class SolverEngine {
     if (this._maxTime === Infinity) return false;
     const elapsed = (Date.now() - this._startTime) / 1000;
     return elapsed >= this._maxTime;
+  }
+
+  /**
+   * Report search progress if enough time has elapsed.
+   * Called from _search() on every recursive invocation but throttled by
+   * wall-clock time (default 1 second interval).
+   */
+  private _maybeLogProgress(depth: number, domains: Map<number, Domain>): void {
+    if (!this._parameters.logSearchProgress && !this._progressCallback) return;
+
+    const now = Date.now();
+    if (now - this._lastLogTime < SolverEngine._LOG_INTERVAL_MS) return;
+    this._lastLogTime = now;
+
+    const bound = this._computeObjectiveBound(domains);
+    const info: SearchProgressInfo = {
+      wallTime: (now - this._startTime) / 1000,
+      numConflicts: this._stats.numConflicts,
+      numBranches: this._stats.numBranches,
+      numSolutions: this._stats.numSolutions,
+      bestObjectiveValue: this._bestObjective,
+      bestObjectiveBound: bound ? (this._isMaximize ? bound.max : bound.min) : null,
+      isMaximize: this._isMaximize,
+      depth,
+    };
+
+    if (this._parameters.logSearchProgress) {
+      const parts = [
+        `[${info.wallTime.toFixed(1)}s]`,
+        `conflicts: ${info.numConflicts}`,
+        `branches: ${info.numBranches}`,
+        `solutions: ${info.numSolutions}`,
+      ];
+      if (this._hasObjective) {
+        parts.push(`obj: ${info.bestObjectiveValue ?? '-'}`);
+        parts.push(`bound: ${info.bestObjectiveBound ?? '-'}`);
+      }
+      console.log(parts.join('  '));
+    }
+
+    if (this._progressCallback) {
+      this._progressCallback.onSearchProgress(info);
+    }
   }
 
   /**
@@ -1156,6 +1228,8 @@ export class SolverEngine {
         return this._propagateAbsEquality(constraint as AbsEqualityConstraint, domains);
       case 'ALLOWED_ASSIGNMENTS':
         return this._propagateAllowedAssignments(constraint as AllowedAssignmentsConstraint, domains);
+      case 'FORBIDDEN_ASSIGNMENTS':
+        return this._propagateForbiddenAssignments(constraint as ForbiddenAssignmentsConstraint, domains);
       case 'NO_OVERLAP':
         return this._propagateNoOverlapConstraint(constraint as NoOverlapConstraint, domains);
       case 'CUMULATIVE':
@@ -1170,6 +1244,8 @@ export class SolverEngine {
         return this._propagateNoOverlap2DConstraint(constraint as NoOverlap2DConstraint, domains);
       case 'DIVISION_EQUALITY':
         return this._propagateDivisionEquality(constraint as DivisionEqualityConstraint, domains);
+      case 'AUTOMATON':
+        return propagateAutomaton(constraint as AutomatonConstraint, domains);
       default:
         return 'CONSISTENT';
     }
@@ -1449,6 +1525,7 @@ export class SolverEngine {
 
     if (falseCount === ct.literals.length - 1 && lastUnassigned) {
       domains.set(lastUnassigned.index, new Domain([1, 1]));
+      this._reasonTrail.setReason(lastUnassigned.index, { type: 'propagation', constraintIndex: ct.index });
       this._stats.numBooleanPropagations++;
       return 'CHANGED';
     }
@@ -1465,6 +1542,7 @@ export class SolverEngine {
 
       if (d.size > 1) {
         domains.set(lit.index, new Domain([1, 1]));
+        this._reasonTrail.setReason(lit.index, { type: 'propagation', constraintIndex: ct.index });
         this._stats.numBooleanPropagations++;
         changed = true;
       }
@@ -1494,6 +1572,7 @@ export class SolverEngine {
         const d = domains.get(lit.index)!;
         if (d.size > 1) {
           domains.set(lit.index, new Domain([0, 0]));
+          this._reasonTrail.setReason(lit.index, { type: 'propagation', constraintIndex: ct.index });
           this._stats.numBooleanPropagations++;
           changed = true;
         }
@@ -1525,6 +1604,7 @@ export class SolverEngine {
         const d = domains.get(lit.index)!;
         if (d.size > 1) {
           domains.set(lit.index, new Domain([0, 0]));
+          this._reasonTrail.setReason(lit.index, { type: 'propagation', constraintIndex: ct.index });
           this._stats.numBooleanPropagations++;
           changed = true;
         }
@@ -1534,6 +1614,7 @@ export class SolverEngine {
 
     if (falseCount === ct.literals.length - 1 && lastUnassigned) {
       domains.set(lastUnassigned.index, new Domain([1, 1]));
+      this._reasonTrail.setReason(lastUnassigned.index, { type: 'propagation', constraintIndex: ct.index });
       this._stats.numBooleanPropagations++;
       return 'CHANGED';
     }
@@ -1584,6 +1665,7 @@ export class SolverEngine {
       if (bDomain.max === 0) return 'INFEASIBLE';
       if (bDomain.size > 1) {
         domains.set(ct.b.index, new Domain([1, 1]));
+        this._reasonTrail.setReason(ct.b.index, { type: 'propagation', constraintIndex: ct.index });
         this._stats.numBooleanPropagations++;
         changed = true;
       }
@@ -1594,6 +1676,7 @@ export class SolverEngine {
       if (aDomain.min === 1) return 'INFEASIBLE';
       if (aDomain.size > 1) {
         domains.set(ct.a.index, new Domain([0, 0]));
+        this._reasonTrail.setReason(ct.a.index, { type: 'propagation', constraintIndex: ct.index });
         this._stats.numBooleanPropagations++;
         changed = true;
       }
@@ -2021,6 +2104,114 @@ export class SolverEngine {
     return changed ? 'CHANGED' : 'CONSISTENT';
   }
 
+  /**
+   * Propagate ForbiddenAssignments: remove domain values for which every
+   * extension (every combination of other variables' domain values) results
+   * in a forbidden tuple. A value v at position i is safe if there exists at
+   * least one tuple (v, ..., ...) that is NOT in the forbidden set and whose
+   * other values are all in their respective domains.
+   *
+   * To avoid exponential blowup, propagation is skipped when the Cartesian
+   * product of other variables' domains exceeds MAX_CANDIDATES — the leaf
+   * checker (_checkForbiddenAssignments) still guarantees correctness.
+   */
+  private _propagateForbiddenAssignments(ct: ForbiddenAssignmentsConstraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
+    // Build a Set of forbidden tuples for O(1) lookup
+    const forbiddenSet = new Set<string>();
+    for (const tuple of ct.tuples) {
+      forbiddenSet.add(tuple.join(','));
+    }
+
+    const nVars = ct.vars.length;
+    const MAX_CANDIDATES = 10000;
+
+    let changed = false;
+
+    for (let i = 0; i < nVars; i++) {
+      const v = ct.vars[i];
+      const d = domains.get(v.index)!;
+      if (d.size <= 1) continue;
+
+      // Build Cartesian product of other variables' domain values.
+      // Guard against exponential blowup.
+      const otherValues: number[][] = [];
+      let productSize = 1;
+      let tooLarge = false;
+      for (let j = 0; j < nVars; j++) {
+        if (j === i) continue;
+        const vals = domains.get(ct.vars[j].index)!.values();
+        otherValues.push(vals);
+        productSize *= vals.length;
+        if (productSize > MAX_CANDIDATES) {
+          tooLarge = true;
+          break;
+        }
+      }
+      if (tooLarge) continue; // skip propagation for this position
+
+      // Enumerate all combinations of other variables' values
+      let candidates: number[][] = [[]];
+      for (const vals of otherValues) {
+        const next: number[][] = [];
+        for (const combo of candidates) {
+          for (const val of vals) {
+            next.push([...combo, val]);
+          }
+        }
+        candidates = next;
+      }
+
+      // For each value in vars[i]'s domain, check if it has a safe extension
+      const safeValues = new Set<number>();
+      for (const val of d.values()) {
+        for (const combo of candidates) {
+          // Build the full tuple: insert val at position i
+          const fullTuple: number[] = [];
+          let comboIdx = 0;
+          for (let j = 0; j < nVars; j++) {
+            if (j === i) {
+              fullTuple.push(val);
+            } else {
+              fullTuple.push(combo[comboIdx++]);
+            }
+          }
+          if (!forbiddenSet.has(fullTuple.join(','))) {
+            safeValues.add(val);
+            break; // one safe extension is enough
+          }
+        }
+      }
+
+      // Build new domain from safe values only
+      const newIntervals: [number, number][] = [];
+      for (const [start, end] of d.intervals) {
+        let intervalStart = -1;
+        for (let val = start; val <= end; val++) {
+          if (safeValues.has(val)) {
+            if (intervalStart === -1) intervalStart = val;
+          } else {
+            if (intervalStart !== -1) {
+              newIntervals.push([intervalStart, val - 1]);
+              intervalStart = -1;
+            }
+          }
+        }
+        if (intervalStart !== -1) {
+          newIntervals.push([intervalStart, end]);
+        }
+      }
+
+      if (newIntervals.length === 0) return 'INFEASIBLE';
+      const newDomain = new Domain(newIntervals);
+      if (newDomain.size < d.size) {
+        domains.set(v.index, newDomain);
+        changed = true;
+      }
+    }
+
+    return changed ? 'CHANGED' : 'CONSISTENT';
+  }
+
   // ============================================================================
   // Scheduling Propagation
   // ============================================================================
@@ -2276,5 +2467,88 @@ export class SolverEngine {
    */
   stop(): void {
     this._stopped = true;
+  }
+
+  /**
+   * Return the subset of assumption indices that together make the model
+   * infeasible (the UNSAT core). Returns an empty array if the model was
+   * not proven infeasible or if no assumptions were used.
+   *
+   * The core is extracted by walking the reason trail: every domain
+   * restriction caused by an assumption is recorded, and the transitive
+   * closure over propagation reasons identifies all assumptions involved
+   * in the conflict.
+   */
+  sufficientAssumptionsForInfeasibility(): number[] {
+    if (!this._infeasibleAfterAssumptions) return [];
+
+    const assumptionsNeeded = new Set<number>();
+    const model = this._model;
+
+    // Helper: get all variable indices involved in a constraint
+    const getConstraintVarIndices = (ct: Constraint): number[] => {
+      const indices: number[] = [];
+      switch (ct.type) {
+        case 'LINEAR': {
+          const c = ct as LinearConstraint;
+          for (const v of c.vars) indices.push(v.index);
+          break;
+        }
+        case 'BOOL_OR':
+        case 'BOOL_AND':
+        case 'AT_MOST_ONE':
+        case 'EXACTLY_ONE':
+        case 'BOOL_XOR': {
+          const c = ct as BoolOrConstraint;
+          for (const v of c.literals) indices.push(v.index);
+          break;
+        }
+        case 'IMPLICATION': {
+          const c = ct as ImplicationConstraint;
+          indices.push(c.a.index, c.b.index);
+          break;
+        }
+        default:
+          // For other constraint types, we don't track reasons yet
+          break;
+      }
+      return indices;
+    };
+
+    // Walk the reason chain: start from all variables that have reasons,
+    // follow propagation reasons back to their constraint's input variables,
+    // and collect all assumption reasons encountered.
+    const visited = new Set<number>();
+    const queue: number[] = [];
+
+    // Seed the queue with all variables that have reasons
+    for (const [varIdx] of this._reasonTrail.allReasons()) {
+      queue.push(varIdx);
+    }
+
+    while (queue.length > 0) {
+      const varIdx = queue.pop()!;
+      if (visited.has(varIdx)) continue;
+      visited.add(varIdx);
+
+      const reason = this._reasonTrail.getReason(varIdx);
+      if (!reason) continue;
+
+      if (reason.type === 'assumption') {
+        assumptionsNeeded.add(reason.assumptionIndex);
+      } else {
+        // Propagation reason: follow the chain to the constraint's variables
+        const ct = model.constraints[reason.constraintIndex];
+        if (ct) {
+          for (const idx of getConstraintVarIndices(ct)) {
+            if (!visited.has(idx)) {
+              queue.push(idx);
+            }
+          }
+        }
+      }
+    }
+
+    return Array.from(assumptionsNeeded).sort((a, b) => a - b);
   }
 }

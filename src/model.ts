@@ -7,12 +7,18 @@ import {
   Domain,
   LinearExpr,
   LinearExprLike,
+  LinearExpressionData,
   BoundedLinearExpression,
   NotEqualExpression,
   CpSolverStatus,
   VariableSelectionStrategy,
   DomainReductionStrategy,
   BoolVar,
+  ModelJSON,
+  VariableData,
+  IntervalVarData,
+  ConstraintData,
+  DecisionStrategyData,
 } from './types';
 
 import {
@@ -648,7 +654,6 @@ export class CpModel {
     finalStates: number[],
     transitionTriples: [number, number, number][]
   ): AutomatonConstraint {
-    console.warn('AUTOMATON: DFA solution-checking is implemented, but constraint propagation is not — search may be slow on automaton-heavy models.');
     const index = this._constraints.length;
     const constraint = new AutomatonConstraint(
       index,
@@ -1243,6 +1248,441 @@ export class CpModel {
       `Constraints: ${constraints}`,
       `Objective: ${this._objective ? (this._maximize ? 'maximize' : 'minimize') : 'none'}`,
     ].join('\n');
+  }
+
+  // ============================================================================
+  // JSON Serialization
+  // ============================================================================
+
+  /**
+   * Serialize the model to a JSON-serializable object.
+   * Variable references are stored as numeric indices.
+   */
+  toJSON(): ModelJSON {
+    const toExprData = (expr: LinearExpr): LinearExpressionData => ({
+      vars: expr.vars.map(v => v.index),
+      coeffs: [...expr.coeffs],
+      offset: expr.offset,
+    });
+
+    const toIntervalData = (iv: IntervalVarImpl): IntervalVarData => ({
+      index: iv.index,
+      name: iv.name,
+      start: toExprData(iv.start),
+      size: toExprData(iv.size),
+      end: toExprData(iv.end),
+      isPresent: iv.isPresent ? iv.isPresent.index : undefined,
+    });
+
+    const varIdx = (v: { index: number }) => v.index;
+
+    // Serialize variables
+    const variables: VariableData[] = [];
+    for (const v of this._registry.allIntVars) {
+      variables.push({ index: v.index, name: v.name, type: 'int', domain: v.domain.intervals.map(([a, b]) => [a, b]) });
+    }
+    for (const v of this._registry.allBoolVars) {
+      variables.push({ index: v.index, name: v.name, type: 'bool', domain: [[0, 1]] });
+    }
+
+    const intervalVariables: IntervalVarData[] = [];
+    for (const iv of this._registry.allIntervalVars) {
+      intervalVariables.push(toIntervalData(iv));
+    }
+
+    // Serialize constraints
+    const constraints: ConstraintData[] = [];
+    for (const ct of this._constraints) {
+      const base: ConstraintData = { type: ct.type, index: ct.index, name: ct.name || undefined };
+
+      switch (ct.type) {
+        case 'LINEAR': {
+          const c = ct as LinearConstraint;
+          base.vars = c.vars.map(varIdx);
+          base.coeffs = [...c.coeffs];
+          base.domain = c.domain.intervals.map(([a, b]) => [a, b]);
+          break;
+        }
+        case 'NOT_EQUAL': {
+          const c = ct as NotEqualConstraint;
+          base.expr = toExprData(c.expr);
+          base.value = c.value;
+          break;
+        }
+        case 'ALL_DIFFERENT': {
+          const c = ct as AllDifferentConstraint;
+          base.expressions = c.expressions.map(toExprData);
+          break;
+        }
+        case 'ELEMENT': {
+          const c = ct as ElementConstraint;
+          base.indexVar = c.indexVar.index;
+          base.vars = c.vars.map(varIdx);
+          base.target = c.target.index;
+          break;
+        }
+        case 'CIRCUIT':
+        case 'MULTIPLE_CIRCUIT': {
+          const c = ct as CircuitConstraint;
+          base.arcs = c.arcs.map(([t, h, l]) => [t, h, l.index]);
+          break;
+        }
+        case 'ALLOWED_ASSIGNMENTS':
+        case 'FORBIDDEN_ASSIGNMENTS': {
+          const c = ct as AllowedAssignmentsConstraint;
+          base.vars = c.vars.map(varIdx);
+          base.tuples = c.tuples.map(t => [...t]);
+          break;
+        }
+        case 'AUTOMATON': {
+          const c = ct as AutomatonConstraint;
+          base.vars = c.vars.map(varIdx);
+          base.transitionVars = c.transitionVars.map(varIdx);
+          base.startingState = c.startingState;
+          base.finalStates = [...c.finalStates];
+          base.transitionTail = [...c.transitionTail];
+          base.transitionHead = [...c.transitionHead];
+          base.transitionLabel = [...c.transitionLabel];
+          break;
+        }
+        case 'INVERSE': {
+          const c = ct as InverseConstraint;
+          base.fDirect = c.fDirect.map(varIdx);
+          base.fInverse = c.fInverse.map(varIdx);
+          break;
+        }
+        case 'RESERVOIR': {
+          const c = ct as ReservoirConstraint;
+          base.times = c.times.map(toExprData);
+          base.levelChanges = c.levelChanges.map(toExprData);
+          base.activeLiterals = c.activeLiterals.map(varIdx);
+          base.minLevel = c.minLevel;
+          base.maxLevel = c.maxLevel;
+          break;
+        }
+        case 'BOOL_OR':
+        case 'BOOL_AND':
+        case 'AT_MOST_ONE':
+        case 'EXACTLY_ONE':
+        case 'BOOL_XOR': {
+          const c = ct as BoolOrConstraint;
+          base.literals = c.literals.map(varIdx);
+          break;
+        }
+        case 'IMPLICATION': {
+          const c = ct as ImplicationConstraint;
+          base.a = c.a.index;
+          base.b = c.b.index;
+          break;
+        }
+        case 'MIN_EQUALITY':
+        case 'MAX_EQUALITY': {
+          const c = ct as MinEqualityConstraint;
+          base.target = c.target.index;
+          base.expressions = c.expressions.map(toExprData);
+          break;
+        }
+        case 'DIVISION_EQUALITY': {
+          const c = ct as DivisionEqualityConstraint;
+          base.target = c.target.index;
+          base.num = toExprData(c.num);
+          base.denom = toExprData(c.denom);
+          break;
+        }
+        case 'ABS_EQUALITY': {
+          const c = ct as AbsEqualityConstraint;
+          base.target = c.target.index;
+          base.expr = toExprData(c.expr);
+          break;
+        }
+        case 'MODULO_EQUALITY': {
+          const c = ct as ModuloEqualityConstraint;
+          base.target = c.target.index;
+          base.expr = toExprData(c.expr);
+          base.mod = toExprData(c.mod);
+          break;
+        }
+        case 'MULTIPLICATION_EQUALITY': {
+          const c = ct as MultiplicationEqualityConstraint;
+          base.target = c.target.index;
+          base.expressions = c.expressions.map(toExprData);
+          break;
+        }
+        case 'NO_OVERLAP': {
+          const c = ct as NoOverlapConstraint;
+          base.intervals = c.intervals.map(iv => toIntervalData(iv as IntervalVarImpl));
+          break;
+        }
+        case 'NO_OVERLAP_2D': {
+          const c = ct as NoOverlap2DConstraint;
+          base.xIntervals = c.xIntervals.map(iv => toIntervalData(iv as IntervalVarImpl));
+          base.yIntervals = c.yIntervals.map(iv => toIntervalData(iv as IntervalVarImpl));
+          break;
+        }
+        case 'CUMULATIVE': {
+          const c = ct as CumulativeConstraint;
+          base.intervals = c.intervals.map(iv => toIntervalData(iv as IntervalVarImpl));
+          base.demands = c.demands.map(toExprData);
+          base.capacity = toExprData(c.capacity);
+          break;
+        }
+        case 'MAP_DOMAIN': {
+          const c = ct as MapDomainConstraint;
+          base.target = c.var_.index;
+          base.boolVars = c.boolVars.map(varIdx);
+          base.offset = c.offset;
+          break;
+        }
+      }
+      constraints.push(base);
+    }
+
+    // Serialize objective
+    let objective: ModelJSON['objective'] = null;
+    if (this._objective) {
+      objective = { expr: toExprData(this._objective), maximize: this._maximize };
+    }
+
+    // Serialize hints
+    const hints: Record<number, number> = {};
+    for (const [k, v] of this._hints) {
+      hints[k] = v;
+    }
+
+    // Serialize assumptions
+    const assumptions = this._assumptions.map(varIdx);
+
+    // Serialize decision strategies
+    const decisionStrategies: DecisionStrategyData[] = this._decisionStrategies.map(ds => ({
+      variables: ds.variables.map(varIdx),
+      varStrategy: ds.varStrategy,
+      domainStrategy: ds.domainStrategy,
+    }));
+
+    return { name: this._name, variables, intervalVariables, constraints, objective, hints, assumptions, decisionStrategies };
+  }
+
+  /**
+   * Reconstruct a model from a JSON object produced by toJSON().
+   */
+  static fromJSON(json: ModelJSON): CpModel {
+    const model = new CpModel(json.name);
+
+    // Reconstruct variables — must register with the correct indices
+    for (const v of json.variables) {
+      if (v.type === 'bool') {
+        const bv = new BoolVarImpl(v.index, v.name);
+        model._registry.registerBoolVar(bv);
+      } else {
+        const iv = new IntVarImpl(v.index, new Domain(v.domain as [number, number][]), v.name);
+        model._registry.registerIntVar(iv);
+      }
+    }
+    // Advance the registry's index counter past all variable indices
+    const maxVarIdx = json.variables.reduce((m, v) => Math.max(m, v.index), -1);
+    while (model._registry.getNextIndex() <= maxVarIdx) { /* pad */ }
+
+    // Reconstruct interval variables
+    const intervalVarMap = new Map<number, IntervalVarImpl>();
+    for (const iv of json.intervalVariables) {
+      const startExpr = CpModel._exprFromData(iv.start, model._registry);
+      const sizeExpr = CpModel._exprFromData(iv.size, model._registry);
+      const endExpr = CpModel._exprFromData(iv.end, model._registry);
+      const isPresent = iv.isPresent !== undefined ? model._registry.getBoolVar(iv.isPresent) : undefined;
+      const intervalVar = new IntervalVarImpl(iv.index, startExpr, sizeExpr, endExpr, iv.name, isPresent);
+      model._registry.registerIntervalVar(intervalVar);
+      intervalVarMap.set(iv.index, intervalVar);
+    }
+    // Advance index counter past interval variable indices
+    const maxIvIdx = json.intervalVariables.reduce((m, v) => Math.max(m, v.index), maxVarIdx);
+    while (model._registry.getNextIndex() <= maxIvIdx) { /* pad */ }
+
+    // Helper: look up variable by index (returns IntVarImpl for int vars, BoolVarImpl for bool vars)
+    const getVar = (idx: number): IntVarImpl => {
+      const v = model._registry.getIntVar(idx) || model._registry.getBoolVar(idx);
+      if (!v) throw new Error(`Variable index ${idx} not found during deserialization`);
+      return v as IntVarImpl;
+    };
+    const getBoolVar = (idx: number): BoolVarImpl => {
+      const v = model._registry.getBoolVar(idx);
+      if (!v) throw new Error(`BoolVar index ${idx} not found during deserialization`);
+      return v;
+    };
+
+    // Reconstruct constraints
+    for (const cd of json.constraints) {
+      switch (cd.type) {
+        case 'LINEAR': {
+          const vars = cd.vars!.map(getVar);
+          model._constraints.push(new LinearConstraint(cd.index, vars, cd.coeffs!, new Domain(cd.domain as [number, number][]), cd.name));
+          break;
+        }
+        case 'NOT_EQUAL': {
+          model._constraints.push(new NotEqualConstraint(cd.index, CpModel._exprFromData(cd.expr!, model._registry), cd.value!, cd.name));
+          break;
+        }
+        case 'ALL_DIFFERENT': {
+          model._constraints.push(new AllDifferentConstraint(cd.index, cd.expressions!.map(e => CpModel._exprFromData(e, model._registry)), cd.name));
+          break;
+        }
+        case 'ELEMENT': {
+          model._constraints.push(new ElementConstraint(cd.index, getVar(cd.indexVar!), cd.vars!.map(getVar), getVar(cd.target!), cd.name));
+          break;
+        }
+        case 'CIRCUIT': {
+          const arcs: [number, number, BoolVarImpl][] = cd.arcs!.map(([t, h, l]) => [t, h, getBoolVar(l)]);
+          model._constraints.push(new CircuitConstraint(cd.index, arcs, cd.name));
+          break;
+        }
+        case 'MULTIPLE_CIRCUIT': {
+          const arcs: [number, number, BoolVarImpl][] = cd.arcs!.map(([t, h, l]) => [t, h, getBoolVar(l)]);
+          model._constraints.push(new MultipleCircuitConstraint(cd.index, arcs, cd.name));
+          break;
+        }
+        case 'ALLOWED_ASSIGNMENTS': {
+          model._constraints.push(new AllowedAssignmentsConstraint(cd.index, cd.vars!.map(getVar), cd.tuples!, cd.name));
+          break;
+        }
+        case 'FORBIDDEN_ASSIGNMENTS': {
+          model._constraints.push(new ForbiddenAssignmentsConstraint(cd.index, cd.vars!.map(getVar), cd.tuples!, cd.name));
+          break;
+        }
+        case 'AUTOMATON': {
+          model._constraints.push(new AutomatonConstraint(
+            cd.index, cd.vars!.map(getVar), cd.transitionVars!.map(getVar),
+            cd.startingState!, cd.finalStates!, cd.transitionTail!, cd.transitionHead!, cd.transitionLabel!, cd.name
+          ));
+          break;
+        }
+        case 'INVERSE': {
+          model._constraints.push(new InverseConstraint(cd.index, cd.fDirect!.map(getVar), cd.fInverse!.map(getVar), cd.name));
+          break;
+        }
+        case 'RESERVOIR': {
+          model._constraints.push(new ReservoirConstraint(
+            cd.index,
+            cd.times!.map(e => CpModel._exprFromData(e, model._registry)),
+            cd.levelChanges!.map(e => CpModel._exprFromData(e, model._registry)),
+            cd.activeLiterals!.map(i => getBoolVar(i)),
+            cd.minLevel!, cd.maxLevel!, cd.name
+          ));
+          break;
+        }
+        case 'BOOL_OR': {
+          model._constraints.push(new BoolOrConstraint(cd.index, cd.literals!.map(i => getBoolVar(i)), cd.name));
+          break;
+        }
+        case 'BOOL_AND': {
+          model._constraints.push(new BoolAndConstraint(cd.index, cd.literals!.map(i => getBoolVar(i)), cd.name));
+          break;
+        }
+        case 'AT_MOST_ONE': {
+          model._constraints.push(new AtMostOneConstraint(cd.index, cd.literals!.map(i => getBoolVar(i)), cd.name));
+          break;
+        }
+        case 'EXACTLY_ONE': {
+          model._constraints.push(new ExactlyOneConstraint(cd.index, cd.literals!.map(i => getBoolVar(i)), cd.name));
+          break;
+        }
+        case 'BOOL_XOR': {
+          model._constraints.push(new BoolXorConstraint(cd.index, cd.literals!.map(i => getBoolVar(i)), cd.name));
+          break;
+        }
+        case 'IMPLICATION': {
+          model._constraints.push(new ImplicationConstraint(cd.index, getBoolVar(cd.a!), getBoolVar(cd.b!), cd.name));
+          break;
+        }
+        case 'MIN_EQUALITY': {
+          model._constraints.push(new MinEqualityConstraint(cd.index, getVar(cd.target!), cd.expressions!.map(e => CpModel._exprFromData(e, model._registry)), cd.name));
+          break;
+        }
+        case 'MAX_EQUALITY': {
+          model._constraints.push(new MaxEqualityConstraint(cd.index, getVar(cd.target!), cd.expressions!.map(e => CpModel._exprFromData(e, model._registry)), cd.name));
+          break;
+        }
+        case 'DIVISION_EQUALITY': {
+          model._constraints.push(new DivisionEqualityConstraint(
+            cd.index, getVar(cd.target!),
+            CpModel._exprFromData(cd.num!, model._registry),
+            CpModel._exprFromData(cd.denom!, model._registry), cd.name
+          ));
+          break;
+        }
+        case 'ABS_EQUALITY': {
+          model._constraints.push(new AbsEqualityConstraint(cd.index, getVar(cd.target!), CpModel._exprFromData(cd.expr!, model._registry), cd.name));
+          break;
+        }
+        case 'MODULO_EQUALITY': {
+          model._constraints.push(new ModuloEqualityConstraint(
+            cd.index, getVar(cd.target!),
+            CpModel._exprFromData(cd.expr!, model._registry),
+            CpModel._exprFromData(cd.mod!, model._registry), cd.name
+          ));
+          break;
+        }
+        case 'MULTIPLICATION_EQUALITY': {
+          model._constraints.push(new MultiplicationEqualityConstraint(cd.index, getVar(cd.target!), cd.expressions!.map(e => CpModel._exprFromData(e, model._registry)), cd.name));
+          break;
+        }
+        case 'NO_OVERLAP': {
+          const intervals = cd.intervals!.map(iv => intervalVarMap.get(iv.index)!);
+          model._constraints.push(new NoOverlapConstraint(cd.index, intervals, cd.name));
+          break;
+        }
+        case 'NO_OVERLAP_2D': {
+          const xIv = cd.xIntervals!.map(iv => intervalVarMap.get(iv.index)!);
+          const yIv = cd.yIntervals!.map(iv => intervalVarMap.get(iv.index)!);
+          model._constraints.push(new NoOverlap2DConstraint(cd.index, xIv, yIv, cd.name));
+          break;
+        }
+        case 'CUMULATIVE': {
+          const intervals = cd.intervals!.map(iv => intervalVarMap.get(iv.index)!);
+          const demands = cd.demands!.map(e => CpModel._exprFromData(e, model._registry));
+          const capacity = CpModel._exprFromData(cd.capacity!, model._registry);
+          model._constraints.push(new CumulativeConstraint(cd.index, intervals, demands, capacity, cd.name));
+          break;
+        }
+        case 'MAP_DOMAIN': {
+          model._constraints.push(new MapDomainConstraint(cd.index, getVar(cd.target!), cd.boolVars!.map(i => getBoolVar(i)), cd.offset!, cd.name));
+          break;
+        }
+      }
+    }
+
+    // Reconstruct objective
+    if (json.objective) {
+      model._objective = CpModel._exprFromData(json.objective.expr, model._registry);
+      model._maximize = json.objective.maximize;
+    }
+
+    // Reconstruct hints
+    for (const [k, v] of Object.entries(json.hints)) {
+      model._hints.set(Number(k), v);
+    }
+
+    // Reconstruct assumptions
+    model._assumptions = json.assumptions.map(i => getBoolVar(i));
+
+    // Reconstruct decision strategies
+    for (const ds of json.decisionStrategies) {
+      model._decisionStrategies.push({
+        variables: ds.variables.map(getVar),
+        varStrategy: ds.varStrategy as VariableSelectionStrategy,
+        domainStrategy: ds.domainStrategy as DomainReductionStrategy,
+      });
+    }
+
+    return model;
+  }
+
+  /** Reconstruct a LinearExpr from serialized data */
+  private static _exprFromData(data: LinearExpressionData, registry: VariableRegistry): LinearExpr {
+    const vars = data.vars.map(idx => {
+      const v = registry.getIntVar(idx) || registry.getBoolVar(idx);
+      if (!v) throw new Error(`Variable index ${idx} not found during deserialization`);
+      return v;
+    });
+    return new LinearExpr(vars, [...data.coeffs], data.offset);
   }
 
   /**

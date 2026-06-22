@@ -834,3 +834,127 @@ export interface SolverStatistics {
   /** Search time in seconds */
   searchTime: number;
 }
+
+// ============================================================================
+// Search Progress
+// ============================================================================
+
+/**
+ * Information about search progress, reported periodically during solving.
+ */
+export interface SearchProgressInfo {
+  /** Wall time in seconds since solve started */
+  wallTime: number;
+  /** Number of conflicts encountered */
+  numConflicts: number;
+  /** Number of branches explored */
+  numBranches: number;
+  /** Number of solutions found so far */
+  numSolutions: number;
+  /** Best objective value found so far (null if no solution yet or no objective) */
+  bestObjectiveValue: number | null;
+  /** Best objective bound from domain relaxation (null if no objective) */
+  bestObjectiveBound: number | null;
+  /** Whether the objective is maximize (true) or minimize (false) */
+  isMaximize: boolean;
+  /** Current search depth */
+  depth: number;
+}
+
+// ============================================================================
+// Model JSON Serialization
+// ============================================================================
+
+/** Serialized variable data */
+export interface VariableData {
+  index: number;
+  name: string;
+  type: 'int' | 'bool';
+  domain: [number, number][];
+}
+
+/** Serialized interval variable data */
+export interface IntervalVarData {
+  index: number;
+  name: string;
+  start: LinearExpressionData;
+  size: LinearExpressionData;
+  end: LinearExpressionData;
+  isPresent?: number; // bool var index, if optional
+}
+
+/** Serialized constraint data — a tagged union keyed on `type` */
+export interface ConstraintData {
+  type: string;
+  index: number;
+  name?: string;
+  // Fields populated based on constraint type:
+  vars?: number[];
+  coeffs?: number[];
+  domain?: [number, number][];
+  expr?: LinearExpressionData;
+  value?: number;
+  expressions?: LinearExpressionData[];
+  literals?: number[];
+  target?: number;
+  indexVar?: number;
+  arcs?: [number, number, number][];
+  tuples?: number[][];
+  startingState?: number;
+  finalStates?: number[];
+  transitionTail?: number[];
+  transitionHead?: number[];
+  transitionLabel?: number[];
+  transitionVars?: number[];
+  fDirect?: number[];
+  fInverse?: number[];
+  times?: LinearExpressionData[];
+  levelChanges?: LinearExpressionData[];
+  activeLiterals?: number[];
+  minLevel?: number;
+  maxLevel?: number;
+  intervals?: IntervalVarData[];
+  xIntervals?: IntervalVarData[];
+  yIntervals?: IntervalVarData[];
+  demands?: LinearExpressionData[];
+  capacity?: LinearExpressionData;
+  num?: LinearExpressionData;
+  denom?: LinearExpressionData;
+  mod?: LinearExpressionData;
+  boolVars?: number[];
+  offset?: number;
+  a?: number;
+  b?: number;
+}
+
+/** Serialized decision strategy data */
+export interface DecisionStrategyData {
+  variables: number[];
+  varStrategy: string;
+  domainStrategy: string;
+}
+
+/** Complete serialized model */
+export interface ModelJSON {
+  name: string;
+  variables: VariableData[];
+  intervalVariables: IntervalVarData[];
+  constraints: ConstraintData[];
+  objective: { expr: LinearExpressionData; maximize: boolean } | null;
+  hints: Record<number, number>;
+  assumptions: number[];
+  decisionStrategies: DecisionStrategyData[];
+}
+
+// ============================================================================
+// Reason Tracking (for UNSAT core extraction)
+// ============================================================================
+
+/**
+ * Reason why a variable's domain was restricted.
+ * Used for UNSAT core extraction: when infeasibility is detected, the reason
+ * chain is walked backwards to find which assumption literals were involved.
+ */
+export type Reason =
+  | { type: 'assumption'; assumptionIndex: number }
+  | { type: 'propagation'; constraintIndex: number };

@@ -3,7 +3,7 @@
  * Solution Callback classes
  */
 
-import { LinearExpr, CpSolverStatus } from './types';
+import { LinearExpr, CpSolverStatus, SearchProgressInfo } from './types';
 import { IntVarImpl, BoolVarImpl } from './variables';
 
 // ============================================================================
@@ -232,4 +232,29 @@ export class ObjectiveSolutionPrinter extends CpSolverSolutionCallback {
     const elapsed = (Date.now() - this._startTime) / 1000;
     console.log(`Solution ${this._solutionCount}: objective = ${this._objectiveValue}, time = ${elapsed.toFixed(3)} s`);
   }
+}
+
+// ============================================================================
+// SearchProgressCallback
+// ============================================================================
+
+/**
+ * Callback interface for periodic search progress reporting.
+ *
+ * Unlike CpSolverSolutionCallback which fires only on new solutions,
+ * SearchProgressCallback fires periodically during search (gated by wall-clock
+ * time, typically every 1 second).
+ *
+ * @example
+ * ```typescript
+ * const progressCb: SearchProgressCallback = {
+ *   onSearchProgress(info) {
+ *     console.log(`[${info.wallTime.toFixed(1)}s] conflicts: ${info.numConflicts}`);
+ *   },
+ * };
+ * solver.solve(model, undefined, progressCb);
+ * ```
+ */
+export interface SearchProgressCallback {
+  onSearchProgress(info: SearchProgressInfo): void;
 }
