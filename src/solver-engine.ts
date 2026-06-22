@@ -4,6 +4,7 @@
  */
 
 import { Domain, LinearExpr, CpSolverStatus, BoolVar, IntVar, SolverParameters } from './types';
+import { TrailMap } from './trail';
 import { IntVarImpl, BoolVarImpl, IntervalVarImpl } from './variables';
 import {
   Constraint,
@@ -170,6 +171,16 @@ export class SolverEngine {
     // Initialize domains
     const domains = this._initializeDomains();
 
+    // Apply assumptions BEFORE presolve: they are hard constraints, so the
+    // entire presolve + search pipeline must be consistent with them. Applying
+    // them after presolve would let presolve remove constraints the assumption
+    // contradicts. A contradictory assumption (vs the initial domain) is
+    // infeasible.
+    if (!this._applyAssumptions(domains)) {
+      this._stats.wallTime = (Date.now() - this._startTime) / 1000;
+      return CpSolverStatus.INFEASIBLE;
+    }
+
     // Run presolve
     const presolveStart = Date.now();
     const presolveResult = this._runPresolve(domains);
@@ -232,8 +243,8 @@ export class SolverEngine {
   /**
    * Initialize domains for all variables
    */
-  private _initializeDomains(): Map<number, Domain> {
-    const domains = new Map<number, Domain>();
+  private _initializeDomains(): TrailMap {
+    const domains = new TrailMap();
 
     for (const v of this._model.registry.allIntVars) {
       domains.set(v.index, new Domain(v.domain.intervals));
@@ -249,16 +260,17 @@ export class SolverEngine {
    * Run presolve to tighten domains and detect affine relations.
    * Modifies domains in-place and stores active constraints / derived vars.
    */
-  private _runPresolve(domains: Map<number, Domain>): {
+  private _runPresolve(domains: TrailMap): {
     status: 'FEASIBLE' | 'INFEASIBLE' | 'OPTIMAL';
-    domains: Map<number, Domain>;
+    domains: TrailMap;
   } {
     const result = presolveModel(this._model, domains);
 
     this._activeConstraints = result.activeConstraints;
     this._derivedVars = result.derivedVars;
 
-    return { status: result.status, domains: result.domains };
+    // presolveModel mutates `domains` in place and returns the same object.
+    return { status: result.status, domains };
   }
 
   /**
@@ -271,6 +283,25 @@ export class SolverEngine {
         domains.set(varIndex, domain.fixValue(value));
       }
     }
+  }
+
+  /**
+   * Apply assumption literals as hard constraints (force each assumed BoolVar
+   * to true). Returns false if an assumption contradicts the current domains
+   * (model infeasible under the assumptions). Currently supports positive
+   * boolean assumptions; negated-literal assumptions would require storing
+   * encoded literals (a future API change).
+   */
+  private _applyAssumptions(domains: Map<number, Domain>): boolean {
+    for (const lit of this._model.assumptions) {
+      const domain = domains.get(lit.index);
+      if (!domain) continue;
+      if (!domain.contains(1)) return false; // assumed true but forced false
+      if (domain.min !== 1 || domain.max !== 1) {
+        domains.set(lit.index, domain.fixValue(1));
+      }
+    }
+    return true;
   }
 
   /**
@@ -311,7 +342,7 @@ export class SolverEngine {
   /**
    * Main search loop using recursive backtracking with branch-and-bound
    */
-  private _search(domains: Map<number, Domain>, depth: number): CpSolverStatus {
+  private _search(domains: TrailMap, depth: number): CpSolverStatus {
     // Check time limit
     if (this._checkTimeLimit()) {
       this._searchExhausted = false;
@@ -330,119 +361,128 @@ export class SolverEngine {
       return CpSolverStatus.INFEASIBLE;
     }
 
-    // Propagate constraints
-    const propagatedDomains = this._cloneDomains(domains);
+    // Propagate constraints in place. The trail records this node's mutations
+    // and the try/finally restores them on EVERY return path — replacing the
+    // former per-node domain clone (and the per-value clone below).
+    domains.pushLevel();
+    try {
+      // Update derived variables' domains from base variable domains
+      this._updateDerivedDomains(domains);
 
-    // Update derived variables' domains from base variable domains
-    this._updateDerivedDomains(propagatedDomains);
+      const propagationResult = this._propagate(domains);
 
-    const propagationResult = this._propagate(propagatedDomains);
-
-    if (!propagationResult) {
-      this._stats.numConflicts++;
-      return CpSolverStatus.INFEASIBLE;
-    }
-
-    // Re-check after propagation
-    if (this._hasObjective && !this._canImprove(propagatedDomains)) {
-      this._stats.numConflicts++;
-      return CpSolverStatus.INFEASIBLE;
-    }
-
-    // Check if all variables are assigned
-    if (this._isComplete(propagatedDomains)) {
-      // Verify all constraints are satisfied
-      if (!this._checkAllConstraints(propagatedDomains)) {
+      if (!propagationResult) {
         this._stats.numConflicts++;
         return CpSolverStatus.INFEASIBLE;
       }
 
-      // Found a solution!
-      const objValue = this._computeObjective(propagatedDomains);
+      // Re-check after propagation
+      if (this._hasObjective && !this._canImprove(domains)) {
+        this._stats.numConflicts++;
+        return CpSolverStatus.INFEASIBLE;
+      }
 
-      // Update incumbent if this is better
-      if (this._hasObjective && objValue !== null) {
-        if (this._bestObjective === null) {
-          this._bestObjective = objValue;
-        } else if (this._isMaximize && objValue > this._bestObjective) {
-          this._bestObjective = objValue;
-        } else if (!this._isMaximize && objValue < this._bestObjective) {
-          this._bestObjective = objValue;
-        } else if (!this._enumerateAll) {
-          // Not better than incumbent — skip (unless enumerating all)
+      // Check if all variables are assigned
+      if (this._isComplete(domains)) {
+        // Verify all constraints are satisfied
+        if (!this._checkAllConstraints(domains)) {
+          this._stats.numConflicts++;
           return CpSolverStatus.INFEASIBLE;
         }
-      }
 
-      this._stats.numSolutions++;
-      this._solution = this._extractSolution(propagatedDomains);
+        // Found a solution!
+        const objValue = this._computeObjective(domains);
 
-      if (this._enumerateAll) {
-        this._allSolutions.push(new Map(this._solution));
-      }
-
-      // Call callback
-      if (this._callback) {
-        const continueSearch = this._callback.onSolution();
-        if (!continueSearch) {
-          this._stopped = true;
+        // Update incumbent if this is better
+        if (this._hasObjective && objValue !== null) {
+          if (this._bestObjective === null) {
+            this._bestObjective = objValue;
+          } else if (this._isMaximize && objValue > this._bestObjective) {
+            this._bestObjective = objValue;
+          } else if (!this._isMaximize && objValue < this._bestObjective) {
+            this._bestObjective = objValue;
+          } else if (!this._enumerateAll) {
+            // Not better than incumbent — skip (unless enumerating all)
+            return CpSolverStatus.INFEASIBLE;
+          }
         }
-      }
 
-      // For pure feasibility or enumerateAll, return OPTIMAL
-      if (!this._hasObjective || this._enumerateAll) {
+        this._stats.numSolutions++;
+        this._solution = this._extractSolution(domains);
+
+        if (this._enumerateAll) {
+          this._allSolutions.push(new Map(this._solution));
+        }
+
+        // Call callback
+        if (this._callback) {
+          const continueSearch = this._callback.onSolution();
+          if (!continueSearch) {
+            this._stopped = true;
+          }
+        }
+
+        // For pure feasibility or enumerateAll, return OPTIMAL
+        if (!this._hasObjective || this._enumerateAll) {
+          return CpSolverStatus.OPTIMAL;
+        }
+
+        // For optimization: we found/improved incumbent, continue searching
         return CpSolverStatus.OPTIMAL;
       }
 
-      // For optimization: we found/improved incumbent, continue searching
-      return CpSolverStatus.OPTIMAL;
-    }
-
-    // Select variable to branch on (MRV heuristic)
-    const varIndex = this._selectVariable(propagatedDomains);
-    if (varIndex === -1) {
-      // Should not happen if isComplete is false
-      return CpSolverStatus.INFEASIBLE;
-    }
-
-    const domain = propagatedDomains.get(varIndex)!;
-    if (domain.isEmpty) {
-      this._stats.numConflicts++;
-      return CpSolverStatus.INFEASIBLE;
-    }
-
-    // Try each value in the domain
-    const values = domain.values();
-
-    for (const value of values) {
-      if (this._stopped) {
-        this._searchExhausted = false;
-        break;
+      // Select variable to branch on (MRV heuristic)
+      const varIndex = this._selectVariable(domains);
+      if (varIndex === -1) {
+        // Should not happen if isComplete is false
+        return CpSolverStatus.INFEASIBLE;
       }
 
-      this._stats.numBranches++;
+      const branchDomain = domains.get(varIndex)!;
+      if (branchDomain.isEmpty) {
+        this._stats.numConflicts++;
+        return CpSolverStatus.INFEASIBLE;
+      }
 
-      // Create new domain with this variable fixed
-      const newDomains = this._cloneDomains(propagatedDomains);
-      newDomains.set(varIndex, new Domain([value, value]));
+      // Try each value in the domain. Each value gets its own trail level so
+      // the variable fix and the child search's mutations are undone before the
+      // next value — replacing the former per-value domain clone.
+      const values = branchDomain.values();
 
-      // Recurse
-      const status = this._search(newDomains, depth + 1);
-
-      if (status === CpSolverStatus.OPTIMAL) {
-        if (!this._enumerateAll && !this._hasObjective) {
-          return CpSolverStatus.OPTIMAL;
+      for (const value of values) {
+        if (this._stopped) {
+          this._searchExhausted = false;
+          break;
         }
-        // Continue searching for better solutions or more solutions
+
+        this._stats.numBranches++;
+
+        domains.pushLevel();
+        try {
+          // Fix this variable to the value and recurse.
+          domains.set(varIndex, new Domain([value, value]));
+          const status = this._search(domains, depth + 1);
+
+          if (status === CpSolverStatus.OPTIMAL) {
+            if (!this._enumerateAll && !this._hasObjective) {
+              return CpSolverStatus.OPTIMAL;
+            }
+            // Continue searching for better solutions or more solutions
+          }
+        } finally {
+          domains.popLevel();
+        }
       }
-    }
 
-    // If we found any solution, return FEASIBLE (for optimization) or INFEASIBLE
-    if (this._solution) {
-      return CpSolverStatus.FEASIBLE;
-    }
+      // If we found any solution, return FEASIBLE (for optimization) or INFEASIBLE
+      if (this._solution) {
+        return CpSolverStatus.FEASIBLE;
+      }
 
-    return CpSolverStatus.INFEASIBLE;
+      return CpSolverStatus.INFEASIBLE;
+    } finally {
+      domains.popLevel();
+    }
   }
 
   /**
@@ -551,17 +591,6 @@ export class SolverEngine {
     if (this._maxTime === Infinity) return false;
     const elapsed = (Date.now() - this._startTime) / 1000;
     return elapsed >= this._maxTime;
-  }
-
-  /**
-   * Clone domains map
-   */
-  private _cloneDomains(domains: Map<number, Domain>): Map<number, Domain> {
-    const cloned = new Map<number, Domain>();
-    for (const [index, domain] of domains) {
-      cloned.set(index, new Domain(domain.intervals));
-    }
-    return cloned;
   }
 
   /**
@@ -1139,6 +1168,8 @@ export class SolverEngine {
         return this._propagateReservoirConstraint(constraint as ReservoirConstraint, domains);
       case 'NO_OVERLAP_2D':
         return this._propagateNoOverlap2DConstraint(constraint as NoOverlap2DConstraint, domains);
+      case 'DIVISION_EQUALITY':
+        return this._propagateDivisionEquality(constraint as DivisionEqualityConstraint, domains);
       default:
         return 'CONSISTENT';
     }
@@ -1572,21 +1603,53 @@ export class SolverEngine {
   }
 
   private _propagateMaxEquality(ct: MaxEqualityConstraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
-    const targetDomain = domains.get(ct.target.index)!;
+    const targetDomain = domains.get(ct.target.index);
+    if (!targetDomain || targetDomain.isEmpty) return 'INFEASIBLE';
 
-    let maxPossible = -Infinity;
+    // Largest expression upper bound; track whether all expressions are fixed.
+    let maxUb = -Infinity;
     let allAssigned = true;
-
     for (const expr of ct.expressions) {
       const exprDomain = this._getExpressionDomain(expr, domains);
-      maxPossible = Math.max(maxPossible, exprDomain.max);
+      if (exprDomain.isEmpty) return 'INFEASIBLE';
+      maxUb = Math.max(maxUb, exprDomain.max);
       if (exprDomain.size > 1) allAssigned = false;
     }
 
-    if (targetDomain.min > maxPossible) return 'INFEASIBLE';
+    // target = max(exprs) cannot exceed the largest expression bound.
+    if (targetDomain.min > maxUb) return 'INFEASIBLE';
 
-    if (allAssigned && targetDomain.size === 1) {
-      const targetVal = targetDomain.min;
+    let changed = false;
+
+    // target <= maxUb
+    if (maxUb < targetDomain.max) {
+      const nd = targetDomain.lessOrEqual(maxUb);
+      if (nd.isEmpty) return 'INFEASIBLE';
+      domains.set(ct.target.index, nd);
+      this._stats.numIntegerPropagations++;
+      changed = true;
+    }
+
+    // Each (simple-var) expression <= target, since target = max(exprs) >= expr.
+    const targetMax = domains.get(ct.target.index)!.max;
+    for (const expr of ct.expressions) {
+      if (expr.vars.length === 1 && expr.coeffs[0] === 1 && expr.offset === 0) {
+        const varIdx = expr.vars[0].index;
+        const varDomain = domains.get(varIdx);
+        if (!varDomain) continue;
+        if (targetMax < varDomain.max) {
+          const nd = varDomain.lessOrEqual(targetMax);
+          if (nd.isEmpty) return 'INFEASIBLE';
+          domains.set(varIdx, nd);
+          this._stats.numIntegerPropagations++;
+          changed = true;
+        }
+      }
+    }
+
+    // Equality check when everything is fixed.
+    if (allAssigned && domains.get(ct.target.index)!.size === 1) {
+      const targetVal = domains.get(ct.target.index)!.min;
       let maxVal = -Infinity;
       for (const expr of ct.expressions) {
         const val = this._evaluateExpression(expr, domains);
@@ -1597,25 +1660,57 @@ export class SolverEngine {
       if (targetVal !== maxVal) return 'INFEASIBLE';
     }
 
-    return 'CONSISTENT';
+    return changed ? 'CHANGED' : 'CONSISTENT';
   }
 
   private _propagateMinEquality(ct: MinEqualityConstraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
-    const targetDomain = domains.get(ct.target.index)!;
+    const targetDomain = domains.get(ct.target.index);
+    if (!targetDomain || targetDomain.isEmpty) return 'INFEASIBLE';
 
-    let minPossible = Infinity;
+    // Smallest expression lower bound; track whether all expressions are fixed.
+    let minLb = Infinity;
     let allAssigned = true;
-
     for (const expr of ct.expressions) {
       const exprDomain = this._getExpressionDomain(expr, domains);
-      minPossible = Math.min(minPossible, exprDomain.min);
+      if (exprDomain.isEmpty) return 'INFEASIBLE';
+      minLb = Math.min(minLb, exprDomain.min);
       if (exprDomain.size > 1) allAssigned = false;
     }
 
-    if (targetDomain.max < minPossible) return 'INFEASIBLE';
+    // target = min(exprs) cannot be below the smallest expression bound.
+    if (targetDomain.max < minLb) return 'INFEASIBLE';
 
-    if (allAssigned && targetDomain.size === 1) {
-      const targetVal = targetDomain.min;
+    let changed = false;
+
+    // target >= minLb
+    if (minLb > targetDomain.min) {
+      const nd = targetDomain.greaterOrEqual(minLb);
+      if (nd.isEmpty) return 'INFEASIBLE';
+      domains.set(ct.target.index, nd);
+      this._stats.numIntegerPropagations++;
+      changed = true;
+    }
+
+    // Each (simple-var) expression >= target, since target = min(exprs) <= expr.
+    const targetMin = domains.get(ct.target.index)!.min;
+    for (const expr of ct.expressions) {
+      if (expr.vars.length === 1 && expr.coeffs[0] === 1 && expr.offset === 0) {
+        const varIdx = expr.vars[0].index;
+        const varDomain = domains.get(varIdx);
+        if (!varDomain) continue;
+        if (targetMin > varDomain.min) {
+          const nd = varDomain.greaterOrEqual(targetMin);
+          if (nd.isEmpty) return 'INFEASIBLE';
+          domains.set(varIdx, nd);
+          this._stats.numIntegerPropagations++;
+          changed = true;
+        }
+      }
+    }
+
+    // Equality check when everything is fixed.
+    if (allAssigned && domains.get(ct.target.index)!.size === 1) {
+      const targetVal = domains.get(ct.target.index)!.min;
       let minVal = Infinity;
       for (const expr of ct.expressions) {
         const val = this._evaluateExpression(expr, domains);
@@ -1626,7 +1721,73 @@ export class SolverEngine {
       if (targetVal !== minVal) return 'INFEASIBLE';
     }
 
-    return 'CONSISTENT';
+    return changed ? 'CHANGED' : 'CONSISTENT';
+  }
+
+  /**
+   * Propagate DivisionEquality (target == trunc(num / denom)).
+   *
+   * Handles the common case — a fixed positive divisor and a non-negative
+   * numerator — where target = floor(num / c) and the bounds are closed-form.
+   * Other cases (variable/negative divisor, negative numerator with the
+   * trunc-toward-zero semantics) fall through to CONSISTENT and are verified by
+   * the leaf checker, so this is always sound.
+   */
+  private _propagateDivisionEquality(ct: DivisionEqualityConstraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
+    const denomDom = this._getExpressionDomain(ct.denom, domains);
+    if (!denomDom || denomDom.isEmpty || denomDom.size !== 1) return 'CONSISTENT';
+    const c = denomDom.min;
+    if (c <= 0) return 'CONSISTENT';
+
+    const numDom = this._getExpressionDomain(ct.num, domains);
+    if (!numDom || numDom.isEmpty) return 'INFEASIBLE';
+    if (numDom.min < 0) return 'CONSISTENT';
+
+    const targetDom = domains.get(ct.target.index);
+    if (!targetDom || targetDom.isEmpty) return 'INFEASIBLE';
+
+    let changed = false;
+
+    // Forward: target = floor(num / c) ∈ [floor(numMin/c), floor(numMax/c)].
+    const fwdTarget = targetDom.intersection(
+      new Domain([Math.floor(numDom.min / c), Math.floor(numDom.max / c)])
+    );
+    if (fwdTarget.isEmpty) return 'INFEASIBLE';
+    if (fwdTarget.size < targetDom.size) {
+      domains.set(ct.target.index, fwdTarget);
+      this._stats.numIntegerPropagations++;
+      changed = true;
+    }
+
+    // Reverse: num ∈ [target*c, target*c + c - 1]; over target's range that is
+    // [tMin*c, tMax*c + c - 1]. Tighten num only when it is a simple variable.
+    const tDom = domains.get(ct.target.index)!;
+    if (ct.num.vars.length === 1 && ct.num.coeffs[0] === 1 && ct.num.offset === 0) {
+      const numVarIdx = ct.num.vars[0].index;
+      const numVarDom = domains.get(numVarIdx);
+      if (numVarDom && !numVarDom.isEmpty) {
+        const lo = tDom.min * c;
+        const hi = tDom.max * c + (c - 1);
+        let nd = numVarDom;
+        if (lo > nd.min) {
+          const tighter = nd.greaterOrEqual(lo);
+          if (tighter.isEmpty) return 'INFEASIBLE';
+          nd = tighter;
+        }
+        if (hi < nd.max) {
+          const tighter = nd.lessOrEqual(hi);
+          if (tighter.isEmpty) return 'INFEASIBLE';
+          nd = tighter;
+        }
+        if (nd.size < numVarDom.size) {
+          domains.set(numVarIdx, nd);
+          this._stats.numIntegerPropagations++;
+          changed = true;
+        }
+      }
+    }
+
+    return changed ? 'CHANGED' : 'CONSISTENT';
   }
 
   /**

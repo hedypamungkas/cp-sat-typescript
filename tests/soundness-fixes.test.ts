@@ -97,3 +97,52 @@ describe('S10 — AT_MOST_ONE counts true literals', () => {
     expect(solver.booleanValue(b)).toBe(false);
   });
 });
+
+describe('C3a — assumptions are applied during solve', () => {
+  it('forces an assumed boolean to true', () => {
+    const model = new CpModel();
+    const b = model.newBoolVar('b');
+    model.addAssumption(b); // b is otherwise free in {0,1}
+    const solver = new CpSolver();
+    const status = solver.solve(model);
+    expect(status).toBe(CpSolverStatus.OPTIMAL);
+    expect(solver.booleanValue(b)).toBe(true);
+  });
+
+  it('returns INFEASIBLE when an assumption contradicts the model', () => {
+    const model = new CpModel();
+    const b = model.newBoolVar('b');
+    model.add(b.eq(0)); // force b false
+    model.addAssumption(b); // assume b true → contradiction
+    const solver = new CpSolver();
+    const status = solver.solve(model);
+    expect(status).toBe(CpSolverStatus.INFEASIBLE);
+  });
+});
+
+describe('P3b — DivisionEquality propagation (constant positive divisor)', () => {
+  it('tightens target to floor(num/denom) over the numerator range', () => {
+    // num in [10,20], denom = 3 → result in {3,4,5,6}. Maximizing/minimizing
+    // the (wide) result must reach 6 / 3 respectively — only possible if the
+    // Div propagator prunes result to [3,6].
+    const modelMax = new CpModel();
+    const num = modelMax.newIntVar(10, 20, 'num');
+    const denom = modelMax.newIntVar(3, 3, 'denom');
+    const result = modelMax.newIntVar(0, 100, 'result');
+    modelMax.addDivisionEquality(result, num, denom);
+    modelMax.maximize(result);
+    const sMax = new CpSolver();
+    expect(sMax.solve(modelMax)).toBe(CpSolverStatus.OPTIMAL);
+    expect(sMax.value(result)).toBe(6);
+
+    const modelMin = new CpModel();
+    const num2 = modelMin.newIntVar(10, 20, 'num');
+    const denom2 = modelMin.newIntVar(3, 3, 'denom');
+    const result2 = modelMin.newIntVar(0, 100, 'result');
+    modelMin.addDivisionEquality(result2, num2, denom2);
+    modelMin.minimize(result2);
+    const sMin = new CpSolver();
+    expect(sMin.solve(modelMin)).toBe(CpSolverStatus.OPTIMAL);
+    expect(sMin.value(result2)).toBe(3);
+  });
+});
