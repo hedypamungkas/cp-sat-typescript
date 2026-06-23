@@ -26,7 +26,10 @@
     "benchmark": "npx tsx benchmarks/scheduling-benchmark.ts && npx tsx benchmarks/circuit-benchmark.ts && npx tsx benchmarks/reservoir-benchmark.ts && npx tsx benchmarks/nooverlap2d-benchmark.ts",
     "benchmark:circuit": "npx tsx benchmarks/circuit-benchmark.ts",
     "benchmark:reservoir": "npx tsx benchmarks/reservoir-benchmark.ts",
-    "benchmark:nooverlap2d": "npx tsx benchmarks/nooverlap2d-benchmark.ts"
+    "benchmark:nooverlap2d": "npx tsx benchmarks/nooverlap2d-benchmark.ts",
+    "benchmark:propagation": "npx tsx benchmarks/propagation-queue-benchmark.ts",
+    "benchmark:scaling": "npx tsx benchmarks/solver-scaling-benchmark.ts",
+    "benchmark:lns": "npx tsx benchmarks/lns-benchmark.ts"
   },
   "keywords": [
     "constraint-programming",

@@ -85,7 +85,7 @@ export class CpModel {
   private _objective: LinearExpr | null = null;
   private _maximize: boolean = false;
   private _hints: Map<number, number> = new Map();
-  private _assumptions: BoolVar[] = [];
+  private _assumptions: (BoolVar | number)[] = [];
   private _decisionStrategies: Array<{
     variables: IntVarImpl[];
     varStrategy: VariableSelectionStrategy;
@@ -155,9 +155,10 @@ export class CpModel {
   }
 
   /**
-   * Get assumptions
+   * Get assumptions. Each element is either a BoolVar (force to true) or a
+   * negated literal number (force the underlying BoolVar to false).
    */
-  get assumptions(): BoolVar[] {
+  get assumptions(): (BoolVar | number)[] {
     return this._assumptions;
   }
 
@@ -1153,20 +1154,21 @@ export class CpModel {
   // ============================================================================
 
   /**
-   * Add an assumption literal
+   * Add an assumption literal.
    *
-   * @param lit - Boolean variable
+   * @param lit - A BoolVar (force to true) or a negated literal number
+   *   from `boolVar.negated` (force the underlying BoolVar to false).
    */
-  addAssumption(lit: BoolVarImpl): void {
+  addAssumption(lit: BoolVarImpl | number): void {
     this._assumptions.push(lit);
   }
 
   /**
    * Add multiple assumption literals
    *
-   * @param literals - Boolean variables
+   * @param literals - Boolean variables or negated literal numbers
    */
-  addAssumptions(literals: BoolVarImpl[]): void {
+  addAssumptions(literals: (BoolVarImpl | number)[]): void {
     this._assumptions.push(...literals);
   }
 

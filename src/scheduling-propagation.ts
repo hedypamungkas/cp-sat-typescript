@@ -38,7 +38,8 @@ export type LinearPropagateFn = (
   coeffs: number[],
   lb: number,
   ub: number,
-  domains: Map<number, Domain>
+  domains: Map<number, Domain>,
+  parentConstraintIndex?: number
 ) => PropagationResult;
 
 // ============================================================================

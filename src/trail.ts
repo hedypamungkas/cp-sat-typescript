@@ -18,6 +18,7 @@ import { Domain, Reason } from './types';
 export class TrailMap extends Map<number, Domain> {
   private _trail: Array<{ idx: number; prev: Domain | undefined }> = [];
   private _marks: number[] = [];
+  private _dirtyVariables: Set<number> = new Set();
 
   /** Begin a new backtrack level. */
   pushLevel(): void {
@@ -42,12 +43,24 @@ export class TrailMap extends Map<number, Domain> {
   override set(idx: number, domain: Domain): this {
     this._trail.push({ idx, prev: super.get(idx) });
     super.set(idx, domain);
+    this._dirtyVariables.add(idx);
     return this;
   }
 
   override delete(idx: number): boolean {
     this._trail.push({ idx, prev: super.get(idx) });
+    this._dirtyVariables.add(idx);
     return super.delete(idx);
+  }
+
+  /** Get the set of variables that have been modified since last clearDirty(). */
+  getDirtyVariables(): Set<number> {
+    return this._dirtyVariables;
+  }
+
+  /** Clear the dirty variable set (call at the start of each propagation pass). */
+  clearDirty(): void {
+    this._dirtyVariables.clear();
   }
 }
 

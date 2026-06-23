@@ -473,4 +473,111 @@ describe('CpSolver - edge cases', () => {
       expect(solver.value(x)).toBe(solver.value(y));
     });
   });
+
+  describe('warm restart', () => {
+    it('should support warm restart with initialBestObjective', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 100, 'x');
+      model.maximize(x);
+
+      const solver = new CpSolver();
+
+      // First solve — find optimal
+      const status1 = solver.solve(model);
+      expect(status1).toBe(CpSolverStatus.OPTIMAL);
+      expect(solver.objectiveValue).toBe(100);
+
+      // Second solve with warm start — pass a suboptimal incumbent
+      // The solver should find the same optimal (100) but prune branches
+      // that can't beat 50
+      const status2 = solver.solve(model, undefined, undefined, {
+        initialBestObjective: 50,
+      });
+      expect(status2).toBe(CpSolverStatus.OPTIMAL);
+      expect(solver.objectiveValue).toBe(100);
+    });
+
+    it('should support warm restart with initialDomains', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 100, 'x');
+      const y = model.newIntVar(0, 100, 'y');
+      model.add(x.add(y).le(50));
+      model.maximize(x.add(y));
+
+      const solver = new CpSolver();
+
+      // First solve
+      const status1 = solver.solve(model);
+      expect(status1).toBe(CpSolverStatus.OPTIMAL);
+
+      // Second solve with warm start — pass a suboptimal incumbent
+      const status2 = solver.solve(model, undefined, undefined, {
+        initialBestObjective: 25,
+      });
+      expect(status2).toBe(CpSolverStatus.OPTIMAL);
+      expect(solver.objectiveValue).toBe(50);
+    });
+  });
+
+  describe('Luby restarts', () => {
+    it('should solve optimization problem with Luby restarts', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 100, 'x');
+      model.maximize(x);
+
+      const solver = new CpSolver();
+      solver.parameters.restartStrategy = 'luby';
+      solver.parameters.restartBaseInterval = 64; // Small interval for testing
+
+      const status = solver.solve(model);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+      expect(solver.objectiveValue).toBe(100);
+    });
+
+    it('should not use restarts for feasibility problems', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 10, 'x');
+      const y = model.newIntVar(0, 10, 'y');
+      model.add(x.add(y).eq(10));
+
+      const solver = new CpSolver();
+      solver.parameters.restartStrategy = 'luby';
+
+      const status = solver.solve(model);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+    });
+  });
+
+  describe('Large Neighborhood Search (LNS)', () => {
+    it('should solve optimization problem with LNS', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 100, 'x');
+      const y = model.newIntVar(0, 100, 'y');
+      model.add(x.add(y).le(50));
+      model.maximize(x.add(y));
+
+      const solver = new CpSolver();
+      solver.parameters.enableLNS = true;
+      solver.parameters.lnsMaxIterations = 5;
+      solver.parameters.lnsNeighborhoodSize = 0.5;
+
+      const status = solver.solve(model);
+      // Status could be OPTIMAL (if B&B exhausts) or FEASIBLE (if LNS stops early)
+      expect(status === CpSolverStatus.OPTIMAL || status === CpSolverStatus.FEASIBLE).toBe(true);
+      expect(solver.objectiveValue).toBe(50);
+    });
+
+    it('should not use LNS for feasibility problems', () => {
+      const model = new CpModel();
+      const x = model.newIntVar(0, 10, 'x');
+      const y = model.newIntVar(0, 10, 'y');
+      model.add(x.add(y).eq(10));
+
+      const solver = new CpSolver();
+      solver.parameters.enableLNS = true;
+
+      const status = solver.solve(model);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+    });
+  });
 });

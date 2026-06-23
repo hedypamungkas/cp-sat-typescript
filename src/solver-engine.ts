@@ -87,6 +87,37 @@ export interface SolutionCallback {
 }
 
 // ============================================================================
+// Luby Sequence Generator
+// ============================================================================
+
+/**
+ * Compute the i-th element of the Luby sequence.
+ * The Luby sequence is defined as:
+ *   luby(i) = luby(k) * luby(i - 2^k + 1) where 2^k <= i < 2^(k+1)
+ * with luby(0) = 1.
+ *
+ * This produces the sequence: 1, 1, 2, 1, 1, 2, 4, 1, 1, 2, 1, 1, 2, 4, 8, ...
+ * which has the property that the sum of the first n elements is O(n * log(n)).
+ */
+function luby(i: number): number {
+  // Find the largest power of 2 that is <= i+1
+  let size = 1;
+  let index = i + 1;
+  while (size < index) {
+    size *= 2;
+  }
+  // Now size/2 <= index <= size
+  while (size > index) {
+    size /= 2;
+  }
+  // Now size <= index < 2*size
+  if (index === size) {
+    return size / 2;
+  }
+  return luby(i - size + 1);
+}
+
+// ============================================================================
 // Solver Engine
 // ============================================================================
 
@@ -117,6 +148,10 @@ export class SolverEngine {
   // Presolve state
   private _activeConstraints: Set<number> | null = null;
   private _derivedVars: Map<number, DerivedVar> | null = null;
+  private _lastPresolveDomains: Map<number, Domain> | null = null;
+
+  // Propagation queue: reverse index (variable → constraint indices that depend on it)
+  private _varToConstraints: Map<number, number[]> | null = null;
 
   // Reason tracking for UNSAT core extraction
   private _reasonTrail: ReasonTrail = new ReasonTrail();
@@ -127,10 +162,31 @@ export class SolverEngine {
   private _lastLogTime: number = 0;
   private _logIntervalMs: number = 1000;
 
+  // Restart state
+  private _restartCount: number = 0;
+  private _conflictsSinceRestart: number = 0;
+  private _restartBaseInterval: number = 256;
+  private _restartEnabled: boolean = false;
+
+  // Random state (LCG)
+  private _randomState: number = 1;
+
+  // LNS state
+  private _lnsEnabled: boolean = false;
+  private _lnsMaxIterations: number = 100;
+  private _lnsNeighborhoodSize: number = 0.5;
+  private _lnsIteration: number | null = null;
+
   constructor(model: CpModel, parameters: SolverParameters = {}) {
     this._model = model;
     this._parameters = parameters;
     this._logIntervalMs = parameters.progressCallbackIntervalMs ?? 1000;
+    this._restartEnabled = parameters.restartStrategy === 'luby';
+    this._restartBaseInterval = parameters.restartBaseInterval ?? 256;
+    this._randomState = parameters.randomSeed ?? 1;
+    this._lnsEnabled = parameters.enableLNS ?? false;
+    this._lnsMaxIterations = parameters.lnsMaxIterations ?? 100;
+    this._lnsNeighborhoodSize = parameters.lnsNeighborhoodSize ?? 0.5;
     this._stats = {
       numConflicts: 0,
       numBranches: 0,
@@ -153,9 +209,17 @@ export class SolverEngine {
   }
 
   /**
-   * Solve the model
+   * Solve the model.
+   *
+   * @param options - Optional warm-restart options:
+   *   - `initialDomains`: pre-set domains from a previous solve (warm start)
+   *   - `initialBestObjective`: incumbent bound from a previous solve (enables B&B pruning from node 0)
    */
-  solve(callback?: SolutionCallback, progressCallback?: SearchProgressCallback): CpSolverStatus {
+  solve(
+    callback?: SolutionCallback,
+    progressCallback?: SearchProgressCallback,
+    options?: { initialDomains?: Map<number, Domain>; initialBestObjective?: number | null }
+  ): CpSolverStatus {
     this._callback = callback || null;
     this._progressCallback = progressCallback || null;
     this._startTime = Date.now();
@@ -165,8 +229,10 @@ export class SolverEngine {
     this._infeasibleAfterAssumptions = false;
     this._solution = null;
     this._allSolutions = [];
-    this._bestObjective = null;
+    this._bestObjective = options?.initialBestObjective ?? null;
     this._searchExhausted = true;
+    this._restartCount = 0;
+    this._conflictsSinceRestart = 0;
     this._stats = {
       numConflicts: 0,
       numBranches: 0,
@@ -184,8 +250,10 @@ export class SolverEngine {
       return CpSolverStatus.MODEL_INVALID;
     }
 
-    // Initialize domains
-    const domains = this._initializeDomains();
+    // Initialize domains — use warm-start domains if provided, otherwise fresh
+    const domains = options?.initialDomains
+      ? new TrailMap([...options.initialDomains])
+      : this._initializeDomains();
 
     // Apply assumptions BEFORE presolve: they are hard constraints, so the
     // entire presolve + search pipeline must be consistent with them. Applying
@@ -201,6 +269,9 @@ export class SolverEngine {
     const presolveStart = Date.now();
     const presolveResult = this._runPresolve(domains);
     this._stats.presolveTime = (Date.now() - presolveStart) / 1000;
+
+    // Store presolve domains for warm restart
+    this._lastPresolveDomains = new Map(presolveResult.domains);
 
     if (presolveResult.status === 'INFEASIBLE') {
       if (this._model.assumptions.length > 0) this._infeasibleAfterAssumptions = true;
@@ -231,9 +302,23 @@ export class SolverEngine {
     // Apply hints
     this._applyHints(presolveResult.domains);
 
-    // Start search
+    // Build reverse index for propagation queue optimization
+    this._buildVarToConstraintsIndex();
+
+    // Start search (with optional restarts and LNS)
     const searchStart = Date.now();
-    const status = this._search(presolveResult.domains, 0);
+    let status: CpSolverStatus;
+
+    if (this._lnsEnabled && this._hasObjective) {
+      // LNS mode: initial B&B solve followed by neighborhood search iterations
+      status = this._searchWithLNS(presolveResult.domains);
+    } else if (this._restartEnabled && this._hasObjective) {
+      // Search with Luby restarts — only for optimization problems
+      status = this._searchWithRestarts(presolveResult.domains);
+    } else {
+      // Standard single-shot search
+      status = this._search(presolveResult.domains, 0);
+    }
     this._stats.searchTime = (Date.now() - searchStart) / 1000;
 
     this._stats.wallTime = (Date.now() - this._startTime) / 1000;
@@ -304,27 +389,44 @@ export class SolverEngine {
   }
 
   /**
-   * Apply assumption literals as hard constraints (force each assumed BoolVar
-   * to true). Returns false if an assumption contradicts the current domains
-   * (model infeasible under the assumptions). Currently supports positive
-   * boolean assumptions; negated-literal assumptions would require storing
-   * encoded literals (a future API change).
+   * Apply assumption literals as hard constraints. Each assumption is either:
+   *   - A BoolVar (positive literal): force the variable to 1
+   *   - A number (negated literal, -(index+1)): force the underlying variable to 0
+   *
+   * Returns false if an assumption contradicts the current domains
+   * (model infeasible under the assumptions).
    */
   private _applyAssumptions(domains: Map<number, Domain>): boolean {
     for (let i = 0; i < this._model.assumptions.length; i++) {
       const lit = this._model.assumptions[i];
-      const domain = domains.get(lit.index);
+
+      // Decode the literal: positive index → force to 1; negative → force to 0
+      let varIndex: number;
+      let targetValue: number;
+      if (typeof lit === 'number') {
+        // Negated literal: -(index + 1) → actual var index, force to 0
+        varIndex = -(lit + 1);
+        targetValue = 0;
+      } else {
+        // Positive BoolVar: force to 1
+        varIndex = lit.index;
+        targetValue = 1;
+      }
+
+      const domain = domains.get(varIndex);
       if (!domain) continue;
+
       // Always record the assumption reason for core extraction,
       // even if the domain already contains the assumed value.
-      this._reasonTrail.setReason(lit.index, { type: 'assumption', assumptionIndex: i });
-      if (!domain.contains(1)) {
+      this._reasonTrail.setReason(varIndex, { type: 'assumption', assumptionIndex: i });
+
+      if (!domain.contains(targetValue)) {
         // Assumption contradicts current domain
         this._infeasibleAfterAssumptions = true;
         return false;
       }
-      if (domain.min !== 1 || domain.max !== 1) {
-        domains.set(lit.index, domain.fixValue(1));
+      if (domain.min !== targetValue || domain.max !== targetValue) {
+        domains.set(varIndex, domain.fixValue(targetValue));
       }
     }
     return true;
@@ -519,6 +621,151 @@ export class SolverEngine {
   }
 
   /**
+   * Search with Luby restarts. Keeps the best objective bound across restarts.
+   * Only called for optimization problems when restartStrategy === 'luby'.
+   */
+  private _searchWithRestarts(initialDomains: TrailMap): CpSolverStatus {
+    const maxRestarts = 1000; // Safety limit
+
+    while (this._restartCount < maxRestarts) {
+      // Compute the conflict threshold for this restart
+      const lubyInterval = luby(this._restartCount) * this._restartBaseInterval;
+      const conflictThreshold = this._stats.numConflicts + lubyInterval;
+
+      // Run search from the initial domains (fresh copy each restart)
+      const domains = new TrailMap();
+      for (const [idx, domain] of initialDomains) {
+        domains.set(idx, domain);
+      }
+      const status = this._search(domains, 0);
+
+      // Check if we should stop
+      if (this._stopped || this._checkTimeLimit()) {
+        return this._solution ? CpSolverStatus.FEASIBLE : CpSolverStatus.UNKNOWN;
+      }
+
+      // If we found an optimal solution, we're done
+      if (status === CpSolverStatus.OPTIMAL && !this._hasObjective) {
+        return CpSolverStatus.OPTIMAL;
+      }
+
+      // If search exhausted all possibilities, we're done
+      if (this._searchExhausted) {
+        return this._solution ? CpSolverStatus.OPTIMAL : CpSolverStatus.INFEASIBLE;
+      }
+
+      // Check if we should restart (conflict threshold reached)
+      if (this._stats.numConflicts >= conflictThreshold) {
+        this._restartCount++;
+        this._conflictsSinceRestart = 0;
+        // Continue to next restart
+      } else {
+        // Search completed without hitting conflict threshold — done
+        return this._solution ? CpSolverStatus.FEASIBLE : CpSolverStatus.UNKNOWN;
+      }
+    }
+
+    // Hit restart limit
+    return this._solution ? CpSolverStatus.FEASIBLE : CpSolverStatus.UNKNOWN;
+  }
+
+  /**
+   * Search with Large Neighborhood Search (LNS).
+   * 1. Initial B&B solve to find a feasible solution
+   * 2. Iterate: relax a random subset of variables, re-solve with warm start
+   * 3. Keep the best solution found across all iterations
+   */
+  private _searchWithLNS(initialDomains: TrailMap): CpSolverStatus {
+    // Phase 1: Initial B&B solve
+    this._lnsIteration = 0;
+    const domains = new TrailMap();
+    for (const [idx, domain] of initialDomains) {
+      domains.set(idx, domain);
+    }
+    let status = this._search(domains, 0);
+
+    // If no solution found in initial solve, LNS can't help
+    if (!this._solution) {
+      this._lnsIteration = null;
+      return status;
+    }
+
+    // Get all non-derived variable indices for neighborhood selection
+    const allVarIndices: number[] = [];
+    for (const [index] of initialDomains) {
+      if (this._derivedVars && this._derivedVars.has(index)) continue;
+      allVarIndices.push(index);
+    }
+
+    // Phase 2: LNS iterations
+    for (let iter = 1; iter <= this._lnsMaxIterations; iter++) {
+      // Check time limit
+      if (this._checkTimeLimit() || this._stopped) break;
+
+      this._lnsIteration = iter;
+
+      // Select random neighborhood: fix a subset of variables to their current values
+      const neighborhoodSize = Math.max(1, Math.floor(allVarIndices.length * this._lnsNeighborhoodSize));
+      const fixedVars = this._selectRandomSubset(allVarIndices, neighborhoodSize);
+
+      // Create restricted domains: fix selected variables to their current values
+      const restrictedDomains = new TrailMap();
+      for (const [idx, domain] of initialDomains) {
+        restrictedDomains.set(idx, domain);
+      }
+
+      // Fix the selected variables to their current solution values
+      for (const varIdx of fixedVars) {
+        const currentVal = this._solution.get(varIdx);
+        if (currentVal !== undefined) {
+          restrictedDomains.set(varIdx, new Domain([currentVal, currentVal]));
+        }
+      }
+
+      // Re-solve with warm start (preserve incumbent bound)
+      const prevBest = this._bestObjective;
+      const prevSolution = this._solution ? new Map(this._solution) : null;
+
+      // Reset search state for this iteration
+      this._searchExhausted = true;
+      const iterDomains = new TrailMap();
+      for (const [idx, domain] of restrictedDomains) {
+        iterDomains.set(idx, domain);
+      }
+
+      status = this._search(iterDomains, 0);
+
+      // If we found a better solution, it's already been updated in _search()
+      // If we didn't find any solution in this iteration, restore the previous best
+      if (!this._solution && prevSolution) {
+        this._solution = prevSolution;
+        this._bestObjective = prevBest;
+      }
+    }
+
+    this._lnsIteration = null;
+    return this._solution ? CpSolverStatus.FEASIBLE : CpSolverStatus.UNKNOWN;
+  }
+
+  /**
+   * Select a random subset of `size` elements from `array`.
+   * Uses Fisher-Yates shuffle for unbiased selection.
+   */
+  private _selectRandomSubset(array: number[], size: number): number[] {
+    const result = [...array];
+    const n = result.length;
+    const k = Math.min(size, n);
+
+    // Fisher-Yates partial shuffle
+    for (let i = 0; i < k; i++) {
+      const j = i + this._nextInt(n - i);
+      [result[i], result[j]] = [result[j], result[i]];
+    }
+
+    return result.slice(0, k);
+  }
+
+  /**
    * Check if all non-derived variables are assigned
    */
   private _isComplete(domains: Map<number, Domain>): boolean {
@@ -556,10 +803,11 @@ export class SolverEngine {
 
   /**
    * Select the next variable to branch on (Minimum Remaining Values)
+   * with random tie-breaking for restart diversity.
    */
   private _selectVariable(domains: Map<number, Domain>): number {
-    let bestIndex = -1;
     let bestSize = Infinity;
+    const candidates: number[] = [];
 
     for (const [index, domain] of domains) {
       if (domain.size <= 1) continue; // Already assigned
@@ -568,11 +816,28 @@ export class SolverEngine {
 
       if (domain.size < bestSize) {
         bestSize = domain.size;
-        bestIndex = index;
+        candidates.length = 0;
+        candidates.push(index);
+      } else if (domain.size === bestSize) {
+        candidates.push(index);
       }
     }
 
-    return bestIndex;
+    if (candidates.length === 0) return -1;
+    if (candidates.length === 1) return candidates[0];
+
+    // Random tie-breaking for restart diversity
+    return candidates[this._nextInt(candidates.length)];
+  }
+
+  /**
+   * Generate a random integer in [0, n) using a simple LCG.
+   * Used for random tie-breaking in variable selection.
+   */
+  private _nextInt(n: number): number {
+    // Linear Congruential Generator (Numerical Recipes parameters)
+    this._randomState = (this._randomState * 1664525 + 1013904223) & 0x7fffffff;
+    return this._randomState % n;
   }
 
   /**
@@ -639,15 +904,28 @@ export class SolverEngine {
     this._lastLogTime = now;
 
     const bound = this._computeObjectiveBound(domains);
+    const bestBound = bound ? (this._isMaximize ? bound.max : bound.min) : null;
+
+    // Compute gap percentage: |objective - bound| / max(1, |objective|) * 100
+    let gapPercent: number | null = null;
+    if (this._bestObjective !== null && bestBound !== null) {
+      const numerator = Math.abs(this._bestObjective - bestBound);
+      const denominator = Math.max(1, Math.abs(this._bestObjective));
+      gapPercent = (numerator / denominator) * 100;
+    }
+
     const info: SearchProgressInfo = {
       wallTime: (now - this._startTime) / 1000,
       numConflicts: this._stats.numConflicts,
       numBranches: this._stats.numBranches,
       numSolutions: this._stats.numSolutions,
       bestObjectiveValue: this._bestObjective,
-      bestObjectiveBound: bound ? (this._isMaximize ? bound.max : bound.min) : null,
+      bestObjectiveBound: bestBound,
+      gapPercent,
       isMaximize: this._isMaximize,
       depth,
+      phase: this._lnsIteration !== null ? 'LNS' : 'B&B',
+      lnsIteration: this._lnsIteration,
     };
 
     if (this._parameters.logSearchProgress) {
@@ -660,6 +938,9 @@ export class SolverEngine {
       if (this._hasObjective) {
         parts.push(`obj: ${info.bestObjectiveValue ?? '-'}`);
         parts.push(`bound: ${info.bestObjectiveBound ?? '-'}`);
+        if (gapPercent !== null) {
+          parts.push(`gap: ${gapPercent.toFixed(1)}%`);
+        }
       }
       console.log(parts.join('  '));
     }
@@ -1148,10 +1429,199 @@ export class SolverEngine {
   // ============================================================================
 
   /**
+   * Build reverse index: variable → constraint indices that depend on it.
+   * Used by the propagation queue to only re-run affected constraints.
+   */
+  private _buildVarToConstraintsIndex(): void {
+    const index = new Map<number, number[]>();
+
+    for (let i = 0; i < this._model.constraints.length; i++) {
+      // Skip inactive constraints
+      if (this._activeConstraints && !this._activeConstraints.has(i)) continue;
+
+      const constraint = this._model.constraints[i];
+      const varIndices = this._getConstraintVarIndices(constraint);
+
+      for (const varIdx of varIndices) {
+        let list = index.get(varIdx);
+        if (!list) {
+          list = [];
+          index.set(varIdx, list);
+        }
+        list.push(i);
+      }
+    }
+
+    this._varToConstraints = index;
+  }
+
+  /**
+   * Get variable indices involved in a constraint (for building reverse index).
+   */
+  private _getConstraintVarIndices(ct: Constraint): number[] {
+    const indices: number[] = [];
+    switch (ct.type) {
+      case 'LINEAR': {
+        const c = ct as LinearConstraint;
+        for (const v of c.vars) indices.push(v.index);
+        break;
+      }
+      case 'NOT_EQUAL': {
+        const c = ct as NotEqualConstraint;
+        for (const v of c.expr.vars) indices.push(v.index);
+        break;
+      }
+      case 'ALL_DIFFERENT': {
+        const c = ct as AllDifferentConstraint;
+        for (const expr of c.expressions) {
+          for (const v of expr.vars) indices.push(v.index);
+        }
+        break;
+      }
+      case 'BOOL_OR':
+      case 'BOOL_AND':
+      case 'AT_MOST_ONE':
+      case 'EXACTLY_ONE':
+      case 'BOOL_XOR': {
+        const c = ct as BoolOrConstraint;
+        for (const v of c.literals) indices.push(v.index);
+        break;
+      }
+      case 'IMPLICATION': {
+        const c = ct as ImplicationConstraint;
+        indices.push(c.a.index, c.b.index);
+        break;
+      }
+      case 'MAX_EQUALITY':
+      case 'MIN_EQUALITY': {
+        const c = ct as MaxEqualityConstraint;
+        indices.push(c.target.index);
+        for (const expr of c.expressions) {
+          for (const v of expr.vars) indices.push(v.index);
+        }
+        break;
+      }
+      case 'ELEMENT': {
+        const c = ct as ElementConstraint;
+        indices.push(c.indexVar.index, c.target.index);
+        for (const v of c.vars) indices.push(v.index);
+        break;
+      }
+      case 'ABS_EQUALITY': {
+        const c = ct as AbsEqualityConstraint;
+        indices.push(c.target.index);
+        for (const v of c.expr.vars) indices.push(v.index);
+        break;
+      }
+      case 'DIVISION_EQUALITY': {
+        const c = ct as DivisionEqualityConstraint;
+        indices.push(c.target.index);
+        for (const v of c.num.vars) indices.push(v.index);
+        for (const v of c.denom.vars) indices.push(v.index);
+        break;
+      }
+      case 'MODULO_EQUALITY': {
+        const c = ct as ModuloEqualityConstraint;
+        indices.push(c.target.index);
+        for (const v of c.expr.vars) indices.push(v.index);
+        for (const v of c.mod.vars) indices.push(v.index);
+        break;
+      }
+      case 'MULTIPLICATION_EQUALITY': {
+        const c = ct as MultiplicationEqualityConstraint;
+        indices.push(c.target.index);
+        for (const expr of c.expressions) {
+          for (const v of expr.vars) indices.push(v.index);
+        }
+        break;
+      }
+      case 'ALLOWED_ASSIGNMENTS':
+      case 'FORBIDDEN_ASSIGNMENTS': {
+        const c = ct as AllowedAssignmentsConstraint;
+        for (const v of c.vars) indices.push(v.index);
+        break;
+      }
+      case 'AUTOMATON': {
+        const c = ct as AutomatonConstraint;
+        for (const v of c.vars) indices.push(v.index);
+        break;
+      }
+      case 'INVERSE': {
+        const c = ct as InverseConstraint;
+        for (const v of c.fDirect) indices.push(v.index);
+        for (const v of c.fInverse) indices.push(v.index);
+        break;
+      }
+      case 'RESERVOIR': {
+        const c = ct as ReservoirConstraint;
+        for (const expr of c.times) {
+          for (const v of expr.vars) indices.push(v.index);
+        }
+        for (const expr of c.levelChanges) {
+          for (const v of expr.vars) indices.push(v.index);
+        }
+        for (const v of c.activeLiterals) indices.push(v.index);
+        break;
+      }
+      case 'CIRCUIT':
+      case 'MULTIPLE_CIRCUIT': {
+        const c = ct as CircuitConstraint;
+        for (const [, , lit] of c.arcs) indices.push(lit.index);
+        break;
+      }
+      case 'NO_OVERLAP': {
+        const c = ct as NoOverlapConstraint;
+        for (const iv of c.intervals) {
+          const ivImpl = iv as IntervalVarImpl;
+          for (const v of ivImpl.start.vars) indices.push(v.index);
+          for (const v of ivImpl.end.vars) indices.push(v.index);
+        }
+        break;
+      }
+      case 'NO_OVERLAP_2D': {
+        const c = ct as NoOverlap2DConstraint;
+        for (const iv of c.xIntervals) {
+          const ivImpl = iv as IntervalVarImpl;
+          for (const v of ivImpl.start.vars) indices.push(v.index);
+          for (const v of ivImpl.end.vars) indices.push(v.index);
+        }
+        for (const iv of c.yIntervals) {
+          const ivImpl = iv as IntervalVarImpl;
+          for (const v of ivImpl.start.vars) indices.push(v.index);
+          for (const v of ivImpl.end.vars) indices.push(v.index);
+        }
+        break;
+      }
+      case 'CUMULATIVE': {
+        const c = ct as CumulativeConstraint;
+        for (const iv of c.intervals) {
+          const ivImpl = iv as IntervalVarImpl;
+          for (const v of ivImpl.start.vars) indices.push(v.index);
+          for (const v of ivImpl.end.vars) indices.push(v.index);
+        }
+        for (const expr of c.demands) {
+          for (const v of expr.vars) indices.push(v.index);
+        }
+        for (const v of c.capacity.vars) indices.push(v.index);
+        break;
+      }
+      case 'MAP_DOMAIN': {
+        const c = ct as MapDomainConstraint;
+        indices.push(c.var_.index);
+        for (const v of c.boolVars) indices.push(v.index);
+        break;
+      }
+      default:
+        break;
+    }
+    return indices;
+  }
+
+  /**
    * Propagate all constraints until fixpoint
    * Returns false if inconsistency detected
    */
-  private _propagate(domains: Map<number, Domain>): boolean {
+  private _propagate(domains: TrailMap): boolean {
     let changed = true;
     let iterations = 0;
     // Safety ceiling only: a correct (monotonic) fixpoint converges well below
@@ -1160,6 +1630,27 @@ export class SolverEngine {
     // that should be fixed, not a "consistent" result to trust.
     const maxIterations = 1000;
 
+    // First pass: propagate all constraints
+    domains.clearDirty();
+    for (let i = 0; i < this._model.constraints.length; i++) {
+      if (this._activeConstraints && !this._activeConstraints.has(i)) continue;
+
+      const constraint = this._model.constraints[i];
+      const result = this._propagateConstraint(constraint, domains);
+      if (result === 'INFEASIBLE') {
+        return false;
+      }
+      if (result === 'CHANGED') {
+        changed = true;
+      }
+    }
+
+    // Check for empty domains
+    for (const [_index, domain] of domains) {
+      if (domain.isEmpty) return false;
+    }
+
+    // Subsequent passes: only propagate constraints affected by changed variables
     while (changed) {
       changed = false;
       iterations++;
@@ -1171,10 +1662,32 @@ export class SolverEngine {
         break;
       }
 
-      for (let i = 0; i < this._model.constraints.length; i++) {
-        // Skip inactive constraints (removed during presolve)
-        if (this._activeConstraints && !this._activeConstraints.has(i)) continue;
+      // Get dirty variables and clear for this pass
+      const dirty = domains.getDirtyVariables();
+      if (dirty.size === 0) break;
+      domains.clearDirty();
 
+      // Collect constraints to propagate (deduplicated)
+      const toPropagate = new Set<number>();
+      if (this._varToConstraints) {
+        for (const varIdx of dirty) {
+          const constraintIndices = this._varToConstraints.get(varIdx);
+          if (constraintIndices) {
+            for (const idx of constraintIndices) {
+              toPropagate.add(idx);
+            }
+          }
+        }
+      } else {
+        // Fallback: propagate all constraints
+        for (let i = 0; i < this._model.constraints.length; i++) {
+          if (this._activeConstraints && !this._activeConstraints.has(i)) continue;
+          toPropagate.add(i);
+        }
+      }
+
+      // Propagate only the affected constraints
+      for (const i of toPropagate) {
         const constraint = this._model.constraints[i];
         const result = this._propagateConstraint(constraint, domains);
         if (result === 'INFEASIBLE') {
@@ -2249,10 +2762,11 @@ export class SolverEngine {
     coeffs: number[],
     lb: number,
     ub: number,
-    domains: Map<number, Domain>
+    domains: Map<number, Domain>,
+    parentConstraintIndex: number = -1
   ): PropagationResult {
     const bounds = new Domain([lb, ub]);
-    const ct = new LinearConstraint(-1, vars, coeffs, bounds);
+    const ct = new LinearConstraint(parentConstraintIndex, vars, coeffs, bounds);
     return this._propagateLinear(ct, domains);
   }
 
@@ -2264,7 +2778,7 @@ export class SolverEngine {
     domains: Map<number, Domain>
   ): PropagationResult {
     const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d) =>
-      this._propagateLinearCallback(vars, coeffs, lb, ub, d);
+      this._propagateLinearCallback(vars, coeffs, lb, ub, d, ct.index);
 
     const result = propagateNoOverlap(ct, domains, linFn);
     if (result === 'INFEASIBLE') return 'INFEASIBLE';
@@ -2292,7 +2806,7 @@ export class SolverEngine {
     domains: Map<number, Domain>
   ): PropagationResult {
     const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d) =>
-      this._propagateLinearCallback(vars, coeffs, lb, ub, d);
+      this._propagateLinearCallback(vars, coeffs, lb, ub, d, ct.index);
 
     const result = propagateCumulativeTimeTable(ct, domains, linFn);
     if (result === 'INFEASIBLE') return 'INFEASIBLE';
@@ -2364,7 +2878,7 @@ export class SolverEngine {
     domains: Map<number, Domain>
   ): PropagationResult {
     const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d) =>
-      this._propagateLinearCallback(vars, coeffs, lb, ub, d);
+      this._propagateLinearCallback(vars, coeffs, lb, ub, d, ct.index);
 
     return propagateReservoir(ct, domains, linFn);
   }
@@ -2377,7 +2891,7 @@ export class SolverEngine {
     domains: Map<number, Domain>
   ): PropagationResult {
     const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d) =>
-      this._propagateLinearCallback(vars, coeffs, lb, ub, d);
+      this._propagateLinearCallback(vars, coeffs, lb, ub, d, ct.index);
 
     return propagateNoOverlap2D(ct, domains, linFn);
   }
@@ -2473,6 +2987,14 @@ export class SolverEngine {
   }
 
   /**
+   * Get the timestamp (Date.now() value) when solve() was called.
+   * Used by callbacks to compute real-time wall time during search.
+   */
+  get startTime(): number {
+    return this._startTime;
+  }
+
+  /**
    * Set maximum time in seconds
    */
   set maxTime(seconds: number) {
@@ -2491,6 +3013,17 @@ export class SolverEngine {
    */
   stop(): void {
     this._stopped = true;
+  }
+
+  /**
+   * Get the current variable domains. Useful for warm restart: pass the
+   * returned map as `initialDomains` to a subsequent solve() call.
+   * Returns null if solve() has not been called yet.
+   */
+  getCurrentDomains(): Map<number, Domain> | null {
+    // Return a copy of the initial domains (before search modified them)
+    // For warm restart, we want the domains after presolve but before search
+    return this._lastPresolveDomains ? new Map(this._lastPresolveDomains) : null;
   }
 
   /**

@@ -255,19 +255,60 @@ describe('UNSAT Core — sufficientAssumptionsForInfeasibility', () => {
   });
 
   describe('negated assumption literals', () => {
-    it('negated literals are not supported as assumptions', () => {
+    it('should support negated literals as assumptions', () => {
       const model = new CpModel();
       const a = model.newBoolVar('a');
       const b = model.newBoolVar('b');
 
+      // a OR b must be true
       model.addBoolOr([a, b]);
-      model.addAssumption(a.negated as any);
+      // Assume NOT a (force a to false)
+      model.addAssumption(a.negated);
 
       const solver = new CpSolver();
       const status = solver.solve(model);
 
-      // Negated assumption is ignored, model is feasible
+      // With a forced to false, b must be true for BoolOr to hold
       expect(status).toBe(CpSolverStatus.OPTIMAL);
+      expect(solver.value(b)).toBe(1);
+    });
+
+    it('should detect infeasibility with negated assumptions', () => {
+      const model = new CpModel();
+      const a = model.newBoolVar('a');
+
+      // a must be true
+      model.addBoolOr([a]);
+      // Assume NOT a (force a to false) — contradicts BoolOr
+      model.addAssumption(a.negated);
+
+      const solver = new CpSolver();
+      const status = solver.solve(model);
+
+      expect(status).toBe(CpSolverStatus.INFEASIBLE);
+      // UNSAT core should include the assumption
+      const core = solver.sufficientAssumptionsForInfeasibility();
+      expect(core).toContain(0);
+    });
+
+    it('should support mixed positive and negated assumptions', () => {
+      const model = new CpModel();
+      const a = model.newBoolVar('a');
+      const b = model.newBoolVar('b');
+      const c = model.newBoolVar('c');
+
+      // a AND b must be true
+      model.addBoolAnd([a, b]);
+      // Assume NOT c (irrelevant) and a (required)
+      model.addAssumption(c.negated);
+      model.addAssumption(a);
+
+      const solver = new CpSolver();
+      const status = solver.solve(model);
+
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+      expect(solver.value(a)).toBe(1);
+      expect(solver.value(b)).toBe(1);
     });
   });
 });

@@ -813,6 +813,26 @@ export interface SolverParameters {
   symmetryLevel?: number;
   /** Disable propagation for specific constraint types (for benchmarking) */
   disablePropagationForTypes?: string[];
+  /** Restart strategy: 'none' (default) or 'luby' */
+  restartStrategy?: 'none' | 'luby';
+  /**
+   * Base interval for Luby restarts (in conflicts).
+   * Default: 256. The actual restart interval is luby(i) * restartBaseInterval
+   * where i is the restart count.
+   */
+  restartBaseInterval?: number;
+  /** Enable Large Neighborhood Search (LNS) for optimization problems */
+  enableLNS?: boolean;
+  /**
+   * Maximum number of LNS iterations.
+   * Default: 100.
+   */
+  lnsMaxIterations?: number;
+  /**
+   * Fraction of variables to fix in each LNS neighborhood (0.0 to 1.0).
+   * Default: 0.5 (fix 50% of variables, relax 50%).
+   */
+  lnsNeighborhoodSize?: number;
 }
 
 // ============================================================================
@@ -861,10 +881,16 @@ export interface SearchProgressInfo {
   bestObjectiveValue: number | null;
   /** Best objective bound from domain relaxation (null if no objective) */
   bestObjectiveBound: number | null;
+  /** Optimality gap as a percentage: |objective - bound| / max(1, |objective|) * 100. Null if no solution or no objective. */
+  gapPercent: number | null;
   /** Whether the objective is maximize (true) or minimize (false) */
   isMaximize: boolean;
   /** Current search depth */
   depth: number;
+  /** Current search phase: 'B&B' (branch-and-bound) or 'LNS' (large neighborhood search). Null if not in LNS mode. */
+  phase: 'B&B' | 'LNS' | null;
+  /** LNS iteration number (null if not in LNS mode) */
+  lnsIteration: number | null;
 }
 
 // ============================================================================

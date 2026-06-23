@@ -197,3 +197,85 @@ describe('logSearchProgress parameter', () => {
     consoleSpy.mockRestore();
   });
 });
+
+describe('gapPercent in SearchProgressInfo', () => {
+  it('should include gapPercent when objective is present', () => {
+    const model = new CpModel();
+    const x = model.newIntVar(0, 100, 'x');
+    const y = model.newIntVar(0, 100, 'y');
+    model.add(x.add(y).le(50));
+    model.maximize(x.add(y.mul(2)));
+
+    const progressInfos: SearchProgressInfo[] = [];
+    const progressCb = {
+      onSearchProgress(info: SearchProgressInfo): void {
+        progressInfos.push({ ...info });
+      },
+    };
+
+    const solver = new CpSolver();
+    solver.solve(model, undefined, progressCb);
+
+    // Verify gapPercent field exists and has correct type
+    for (const info of progressInfos) {
+      expect(info).toHaveProperty('gapPercent');
+      if (info.bestObjectiveValue !== null && info.bestObjectiveBound !== null) {
+        expect(typeof info.gapPercent).toBe('number');
+        expect(info.gapPercent!).toBeGreaterThanOrEqual(0);
+      } else {
+        expect(info.gapPercent).toBeNull();
+      }
+    }
+  });
+
+  it('should compute gap correctly for maximization', () => {
+    // Create a model where we can control the gap
+    const model = new CpModel();
+    const x = model.newIntVar(0, 100, 'x');
+    model.maximize(x);
+
+    const progressInfos: SearchProgressInfo[] = [];
+    const progressCb = {
+      onSearchProgress(info: SearchProgressInfo): void {
+        progressInfos.push({ ...info });
+      },
+    };
+
+    const solver = new CpSolver();
+    solver.solve(model, undefined, progressCb);
+
+    // For a simple maximize x with domain [0,100], optimal is 100
+    // Gap should be 0 at optimality
+    if (progressInfos.length > 0) {
+      const lastInfo = progressInfos[progressInfos.length - 1];
+      if (lastInfo.bestObjectiveValue !== null && lastInfo.bestObjectiveBound !== null) {
+        const expectedGap = Math.abs(lastInfo.bestObjectiveValue - lastInfo.bestObjectiveBound) /
+          Math.max(1, Math.abs(lastInfo.bestObjectiveValue)) * 100;
+        expect(lastInfo.gapPercent).toBeCloseTo(expectedGap, 5);
+      }
+    }
+  });
+
+  it('should include gap in console output when logSearchProgress is true', () => {
+    const model = new CpModel();
+    const vars = Array.from({ length: 6 }, (_, i) => model.newIntVar(0, 5, `x${i}`));
+    model.addAllDifferent(vars);
+    model.maximize(vars[0].add(vars[1].mul(2)));
+
+    const consoleSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const solver = new CpSolver();
+    solver.parameters.logSearchProgress = true;
+    solver.solve(model);
+
+    // If the solve took > 1s and had an objective, check for gap in output
+    if (solver.wallTime > 1.0) {
+      const calls = consoleSpy.mock.calls.map(c => c.join(' '));
+      const gapCalls = calls.filter(c => c.includes('gap:'));
+      // Gap should appear in progress output when objective is present
+      expect(gapCalls.length).toBeGreaterThan(0);
+    }
+
+    consoleSpy.mockRestore();
+  });
+});

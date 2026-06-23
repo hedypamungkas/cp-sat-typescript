@@ -88,7 +88,12 @@ export class CpSolver {
    * }
    * ```
    */
-  solve(model: CpModel, callback?: CpSolverSolutionCallback, progressCallback?: SearchProgressCallback): CpSolverStatus {
+  solve(
+    model: CpModel,
+    callback?: CpSolverSolutionCallback,
+    progressCallback?: SearchProgressCallback,
+    options?: { initialDomains?: Map<number, import('./types').Domain>; initialBestObjective?: number | null }
+  ): CpSolverStatus {
     // Create solver engine
     this._engine = new SolverEngine(model, this._parameters);
 
@@ -126,11 +131,12 @@ export class CpSolver {
             objValue = model.objective.evaluate((v) => solution.get(v.index) || 0);
           }
 
-          // Update callback
+          // Update callback — use startTime for real-time wall time during
+          // search (stats.wallTime is only written after solve completes).
           callback._setSolution(
             solution,
             objValue,
-            this._engine!.stats.wallTime,
+            (Date.now() - this._engine!.startTime) / 1000,
             this._engine!.stats.numConflicts,
             this._engine!.stats.numBranches
           );
@@ -141,7 +147,7 @@ export class CpSolver {
     }
 
     // Solve
-    this._status = this._engine.solve(engineCallback, progressCallback);
+    this._status = this._engine.solve(engineCallback, progressCallback, options);
 
     // Extract results
     if (this._status === CpSolverStatus.OPTIMAL || this._status === CpSolverStatus.FEASIBLE) {
