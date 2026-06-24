@@ -1451,8 +1451,8 @@ export class CpModel {
       hints[k] = v;
     }
 
-    // Serialize assumptions
-    const assumptions = this._assumptions.map(varIdx);
+    // Serialize assumptions (BoolVar → index; a negated literal is already a number)
+    const assumptions = this._assumptions.map(a => (typeof a === 'number' ? a : a.index));
 
     // Serialize decision strategies
     const decisionStrategies: DecisionStrategyData[] = this._decisionStrategies.map(ds => ({

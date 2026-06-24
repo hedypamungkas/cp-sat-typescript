@@ -833,6 +833,16 @@ export interface SolverParameters {
    * Default: 0.5 (fix 50% of variables, relax 50%).
    */
   lnsNeighborhoodSize?: number;
+  /**
+   * Enable LP-relaxation (fractional-knapsack) bounds for MAXIMIZE objectives
+   * with a detected packing constraint (Σ wᵢ·xᵢ ≤ W, wᵢ ≥ 0). Computes a
+   * tighter upper bound at the post-propagation prune site, so branch-and-bound
+   * prunes more. Pure TypeScript (no external LP solver). Default: OFF.
+   *
+   * For minimize objectives, or models with no usable packing constraint, this
+   * is a no-op (the solver falls back to the interval-arithmetic bound).
+   */
+  enableLpBounds?: boolean;
 }
 
 // ============================================================================

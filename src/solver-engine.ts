@@ -39,6 +39,8 @@ import {
 import { CpModel } from './model';
 import type { SearchProgressCallback } from './callback';
 import { presolveModel, computeDerivedValue, DerivedVar } from './presolve';
+import { detectPackingConstraints, computeLpObjectiveBound, EMPTY_CLASSIFICATION } from './lp-bounds';
+import type { PackingClassification } from './lp-bounds';
 import {
   propagateNoOverlap,
   propagateNoOverlapDetectable,
@@ -102,7 +104,7 @@ export interface SolutionCallback {
 function luby(i: number): number {
   // Find the largest power of 2 that is <= i+1
   let size = 1;
-  let index = i + 1;
+  const index = i + 1;
   while (size < index) {
     size *= 2;
   }
@@ -177,6 +179,10 @@ export class SolverEngine {
   private _lnsNeighborhoodSize: number = 0.5;
   private _lnsIteration: number | null = null;
 
+  // LP-relaxation bound state (detection is cached once per solve() by _runPresolve)
+  private _lpBoundsEnabled: boolean = false;
+  private _packingClassification: PackingClassification = EMPTY_CLASSIFICATION;
+
   constructor(model: CpModel, parameters: SolverParameters = {}) {
     this._model = model;
     this._parameters = parameters;
@@ -187,6 +193,7 @@ export class SolverEngine {
     this._lnsEnabled = parameters.enableLNS ?? false;
     this._lnsMaxIterations = parameters.lnsMaxIterations ?? 100;
     this._lnsNeighborhoodSize = parameters.lnsNeighborhoodSize ?? 0.5;
+    this._lpBoundsEnabled = parameters.enableLpBounds ?? false;
     this._stats = {
       numConflicts: 0,
       numBranches: 0,
@@ -233,6 +240,7 @@ export class SolverEngine {
     this._searchExhausted = true;
     this._restartCount = 0;
     this._conflictsSinceRestart = 0;
+    this._packingClassification = EMPTY_CLASSIFICATION;
     this._stats = {
       numConflicts: 0,
       numBranches: 0,
@@ -372,6 +380,18 @@ export class SolverEngine {
     this._activeConstraints = result.activeConstraints;
     this._derivedVars = result.derivedVars;
 
+    // Detect packing constraints once per solve for the LP-relaxation bound.
+    // Runs after presolve so removed constraints are skipped; only meaningful
+    // for maximize objectives (the fractional-knapsack bound is an upper bound).
+    if (this._lpBoundsEnabled && this._isMaximize && this._objectiveExpr) {
+      this._packingClassification = detectPackingConstraints(
+        this._model.constraints,
+        i => this._activeConstraints !== null && this._activeConstraints.has(i)
+      );
+    } else {
+      this._packingClassification = EMPTY_CLASSIFICATION;
+    }
+
     // presolveModel mutates `domains` in place and returns the same object.
     return { status: result.status, domains };
   }
@@ -441,21 +461,49 @@ export class SolverEngine {
   }
 
   /**
-   * Compute the objective bound (min or max possible) from current domains
+   * Compute the objective bound (min or max possible) from current domains.
+   *
+   * When `strong` is true (used at the post-propagation prune site and in
+   * throttled progress logging) and LP bounds are enabled for a maximize
+   * objective, tighten the upper bound via the fractional-knapsack LP
+   * relaxation. The cheap interval-arithmetic bound is always computed first,
+   * so the result is never looser than today's behavior.
+   *
+   * `strong` is only passed at the post-propagation site on purpose: the LP
+   * bound is O(n log n) per packing constraint, while the interval bound is
+   * O(objective terms). Running the strong bound pre-propagation would slow
+   * every node for little gain, since domains there are looser.
    */
-  private _computeObjectiveBound(domains: Map<number, Domain>): { min: number; max: number } | null {
+  private _computeObjectiveBound(
+    domains: Map<number, Domain>,
+    strong: boolean = false
+  ): { min: number; max: number } | null {
     if (!this._objectiveExpr) return null;
     const exprDomain = this._getExpressionDomain(this._objectiveExpr, domains);
-    return { min: exprDomain.min, max: exprDomain.max };
+    const min = exprDomain.min;
+    let max = exprDomain.max;
+    if (strong && this._lpBoundsEnabled && this._isMaximize) {
+      const lp = computeLpObjectiveBound({
+        objective: this._objectiveExpr,
+        maximize: true,
+        domains,
+        classification: this._packingClassification,
+      });
+      if (lp !== null && lp < max) {
+        max = lp; // tighten the upper bound only (never unsound: lp ≥ true optimum)
+      }
+    }
+    return { min, max };
   }
 
   /**
-   * Check if the current objective bound can still improve on the incumbent
+   * Check if the current objective bound can still improve on the incumbent.
+   * `strong` forwards the LP-relaxation tightening request to _computeObjectiveBound.
    */
-  private _canImprove(domains: Map<number, Domain>): boolean {
+  private _canImprove(domains: Map<number, Domain>, strong: boolean = false): boolean {
     if (!this._hasObjective || this._bestObjective === null) return true;
 
-    const bound = this._computeObjectiveBound(domains);
+    const bound = this._computeObjectiveBound(domains, strong);
     if (!bound) return true;
 
     if (this._isMaximize) {
@@ -508,8 +556,9 @@ export class SolverEngine {
         return CpSolverStatus.INFEASIBLE;
       }
 
-      // Re-check after propagation
-      if (this._hasObjective && !this._canImprove(domains)) {
+      // Re-check after propagation — use the strong (LP) bound here, where
+      // domains are tightest and pruning has the best chance to fire.
+      if (this._hasObjective && !this._canImprove(domains, true)) {
         this._stats.numConflicts++;
         return CpSolverStatus.INFEASIBLE;
       }
@@ -716,7 +765,7 @@ export class SolverEngine {
 
       // Fix the selected variables to their current solution values
       for (const varIdx of fixedVars) {
-        const currentVal = this._solution.get(varIdx);
+        const currentVal = this._solution?.get(varIdx);
         if (currentVal !== undefined) {
           restrictedDomains.set(varIdx, new Domain([currentVal, currentVal]));
         }
@@ -724,7 +773,7 @@ export class SolverEngine {
 
       // Re-solve with warm start (preserve incumbent bound)
       const prevBest = this._bestObjective;
-      const prevSolution = this._solution ? new Map(this._solution) : null;
+      const prevSolution: Map<number, number> | null = this._solution ? new Map(this._solution) : null;
 
       // Reset search state for this iteration
       this._searchExhausted = true;
@@ -903,7 +952,7 @@ export class SolverEngine {
     if (this._logIntervalMs > 0 && now - this._lastLogTime < this._logIntervalMs) return;
     this._lastLogTime = now;
 
-    const bound = this._computeObjectiveBound(domains);
+    const bound = this._computeObjectiveBound(domains, true);
     const bestBound = bound ? (this._isMaximize ? bound.max : bound.min) : null;
 
     // Compute gap percentage: |objective - bound| / max(1, |objective|) * 100

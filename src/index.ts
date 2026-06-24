@@ -161,6 +161,22 @@ export {
 } from './automaton-propagation';
 
 // ============================================================================
+// LP Relaxation Bounds
+// ============================================================================
+
+export {
+  detectPackingConstraints,
+  computeLpObjectiveBound,
+  fractionalKnapsackUpperBound,
+  EMPTY_CLASSIFICATION,
+} from './lp-bounds';
+export type {
+  PackingConstraint,
+  PackingClassification,
+  LpBoundContext,
+} from './lp-bounds';
+
+// ============================================================================
 // Version
 // ============================================================================
 
