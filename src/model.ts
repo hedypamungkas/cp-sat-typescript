@@ -59,6 +59,8 @@ import {
   MapDomainConstraint,
 } from './constraints';
 
+import { normalizeClause } from './clause-engine';
+
 // ============================================================================
 // CpModel Class
 // ============================================================================
@@ -86,6 +88,8 @@ export class CpModel {
   private _maximize: boolean = false;
   private _hints: Map<number, number> = new Map();
   private _assumptions: (BoolVar | number)[] = [];
+  /** Boolean clauses (signed-int literals) for the LCG clause engine. */
+  private _clauses: number[][] = [];
   private _decisionStrategies: Array<{
     variables: IntVarImpl[];
     varStrategy: VariableSelectionStrategy;
@@ -1179,6 +1183,50 @@ export class CpModel {
     this._assumptions = [];
   }
 
+  /** All Boolean clauses added via `addClause` (signed-int literals). */
+  get clauses(): number[][] {
+    return this._clauses;
+  }
+
+  /**
+   * Add a Boolean clause (disjunction): at least one literal must be true.
+   *
+   * Each literal is either a `BoolVar` (positive — "this var is true") or a
+   * number from `boolVar.negated` (i.e. `-(index+1)` — "this var is false").
+   * Literals must reference registered bool variables. Tautologies (containing
+   * both a literal and its negation) are silently dropped; duplicate literals
+   * are folded. An empty clause declares the model UNSAT (handled at solve time).
+   *
+   * Clauses are propagated by the dedicated 2-watched-literal clause engine
+   * (`enableLcg`), not by the per-constraint loop.
+   */
+  addClause(literals: (BoolVarImpl | number)[]): void {
+    const raw: number[] = [];
+    for (const lit of literals) {
+      raw.push(typeof lit === 'number' ? lit : lit.index);
+    }
+    // Validate every literal references a registered bool var.
+    for (const l of raw) {
+      const varIdx = l >= 0 ? l : -(l + 1);
+      if (!this._registry.getBoolVar(varIdx)) {
+        throw new Error(`addClause: literal ${l} does not refer to a registered bool variable (${varIdx})`);
+      }
+    }
+    const norm = normalizeClause(raw);
+    if (norm === null) return; // tautology — always satisfied, drop silently
+    this._clauses.push(norm);
+  }
+
+  /** Add multiple Boolean clauses. */
+  addClauses(list: (BoolVarImpl | number)[][]): void {
+    for (const lits of list) this.addClause(lits);
+  }
+
+  /** Clear all clauses. */
+  clearClauses(): void {
+    this._clauses = [];
+  }
+
   // ============================================================================
   // Decision Strategy
   // ============================================================================
@@ -1454,6 +1502,9 @@ export class CpModel {
     // Serialize assumptions (BoolVar → index; a negated literal is already a number)
     const assumptions = this._assumptions.map(a => (typeof a === 'number' ? a : a.index));
 
+    // Serialize clauses (already signed-int literals)
+    const clauses = this._clauses.map(c => [...c]);
+
     // Serialize decision strategies
     const decisionStrategies: DecisionStrategyData[] = this._decisionStrategies.map(ds => ({
       variables: ds.variables.map(varIdx),
@@ -1461,7 +1512,7 @@ export class CpModel {
       domainStrategy: ds.domainStrategy,
     }));
 
-    return { name: this._name, variables, intervalVariables, constraints, objective, hints, assumptions, decisionStrategies };
+    return { name: this._name, variables, intervalVariables, constraints, objective, hints, assumptions, clauses, decisionStrategies };
   }
 
   /**
@@ -1664,6 +1715,9 @@ export class CpModel {
 
     // Reconstruct assumptions
     model._assumptions = json.assumptions.map(i => getBoolVar(i));
+
+    // Reconstruct clauses
+    model._clauses = (json.clauses ?? []).map((c: number[]) => [...c]);
 
     // Reconstruct decision strategies
     for (const ds of json.decisionStrategies) {

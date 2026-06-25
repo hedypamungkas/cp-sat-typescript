@@ -843,6 +843,16 @@ export interface SolverParameters {
    * is a no-op (the solver falls back to the interval-arithmetic bound).
    */
   enableLpBounds?: boolean;
+  /**
+   * Enable LCG Phase 1: a Boolean clause database with 2-watched-literal unit
+   * propagation, fed by `model.addClause(...)`. Provides efficient unit
+   * propagation over explicit clauses. Pure TypeScript. Default: OFF.
+   *
+   * Phase 1 has NO conflict analysis / clause learning (that is Phase 2), so
+   * enabling this only affects models that use `addClause`. The clause engine
+   * participates in the propagation fixpoint alongside the existing propagators.
+   */
+  enableLcg?: boolean;
 }
 
 // ============================================================================
@@ -869,6 +879,8 @@ export interface SolverStatistics {
   presolveTime: number;
   /** Search time in seconds */
   searchTime: number;
+  /** Number of clauses learned via 1-UIP conflict analysis (LCG Phase 2). */
+  numLearnedClauses: number;
 }
 
 // ============================================================================
@@ -985,6 +997,8 @@ export interface ModelJSON {
   objective: { expr: LinearExpressionData; maximize: boolean } | null;
   hints: Record<number, number>;
   assumptions: number[];
+  /** Boolean clauses (signed-int literals), consumed by the LCG clause engine. */
+  clauses: number[][];
   decisionStrategies: DecisionStrategyData[];
 }
 
@@ -999,4 +1013,6 @@ export interface ModelJSON {
  */
 export type Reason =
   | { type: 'assumption'; assumptionIndex: number }
-  | { type: 'propagation'; constraintIndex: number };
+  | { type: 'propagation'; constraintIndex: number }
+  | { type: 'clause'; clauseId: number }
+  | { type: 'lazyClause'; literals: number[] };

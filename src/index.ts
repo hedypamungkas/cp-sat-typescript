@@ -177,6 +177,29 @@ export type {
 } from './lp-bounds';
 
 // ============================================================================
+// LCG Clause Engine
+// ============================================================================
+
+export {
+  ClauseDatabase,
+  normalizeClause,
+  litVar,
+  litValue,
+  falsifyingLiteral,
+  isLitSatisfied,
+  isLitFalsified,
+} from './clause-engine';
+export type { Literal, ClauseId, PropagationOutcome, OnAssignCallback } from './clause-engine';
+
+// ============================================================================
+// LCG Phase 2 (conflict analysis + clause learning)
+// ============================================================================
+
+export { AssignmentTrail } from './assignment-trail';
+export { analyzeConflict } from './conflict-analysis';
+export type { AnalysisResult } from './conflict-analysis';
+
+// ============================================================================
 // Version
 // ============================================================================
 

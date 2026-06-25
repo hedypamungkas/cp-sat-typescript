@@ -41,6 +41,10 @@ import type { SearchProgressCallback } from './callback';
 import { presolveModel, computeDerivedValue, DerivedVar } from './presolve';
 import { detectPackingConstraints, computeLpObjectiveBound, EMPTY_CLASSIFICATION } from './lp-bounds';
 import type { PackingClassification } from './lp-bounds';
+import { ClauseDatabase, litVar, isLitSatisfied } from './clause-engine';
+import type { PropagationOutcome } from './clause-engine';
+import { AssignmentTrail } from './assignment-trail';
+import { analyzeConflict } from './conflict-analysis';
 import {
   propagateNoOverlap,
   propagateNoOverlapDetectable,
@@ -78,6 +82,7 @@ export interface SolverStats {
   wallTime: number;
   presolveTime: number;
   searchTime: number;
+  numLearnedClauses: number;
 }
 
 // ============================================================================
@@ -183,6 +188,49 @@ export class SolverEngine {
   private _lpBoundsEnabled: boolean = false;
   private _packingClassification: PackingClassification = EMPTY_CLASSIFICATION;
 
+  // LCG clause engine state (Phase 1: clause DB + 2-watched-literal unit propagation)
+  private _lcgEnabled: boolean = false;
+  private _clauseDb: ClauseDatabase | null = null;
+  private _boolVarSet: Set<number> = new Set();
+  // LCG Phase 2: CDCL assignment trail + conflict learning state.
+  private _assignTrail: AssignmentTrail = new AssignmentTrail();
+  /** Conflict explanation literals (all false) from the last conflict, or null if not analyzable. */
+  private _lastConflictLiterals: number[] | null = null;
+  /** Set true when conflict analysis derives the empty clause (root UNSAT). */
+  private _rootUnsat = false;
+  // Reused callbacks for the clause engine (avoid per-call closure allocation).
+  private readonly _isBoolVar = (idx: number): boolean => this._boolVarSet.has(idx);
+  private readonly _onClauseAssign = (lit: number): void => {
+    this._stats.numBooleanPropagations++;
+    this._assignTrail.recordPropagation(lit);
+  };
+
+  /**
+   * Record the reason for a Boolean-family propagation. When LCG is on, store a
+   * clausal explanation (lazyClause) + record on the assignment trail (for 1-UIP
+   * resolution). When off, store the legacy constraint-index reason (for UNSAT
+   * cores). `explanation` is the FULL clause including the forced literal.
+   */
+  private _recordBoolReason(
+    varIdx: number,
+    value: 0 | 1,
+    constraintIndex: number,
+    explanation: number[]
+  ): void {
+    this._stats.numBooleanPropagations++;
+    if (this._lcgEnabled) {
+      this._reasonTrail.setReason(varIdx, { type: 'lazyClause', literals: explanation });
+      this._assignTrail.recordPropagation(value === 1 ? varIdx : -(varIdx + 1));
+    } else {
+      this._reasonTrail.setReason(varIdx, { type: 'propagation', constraintIndex });
+    }
+  }
+
+  /** Capture a Boolean-family conflict explanation (for 1-UIP analysis). */
+  private _recordBoolConflict(explanation: number[]): void {
+    if (this._lcgEnabled) this._lastConflictLiterals = explanation;
+  }
+
   constructor(model: CpModel, parameters: SolverParameters = {}) {
     this._model = model;
     this._parameters = parameters;
@@ -194,6 +242,7 @@ export class SolverEngine {
     this._lnsMaxIterations = parameters.lnsMaxIterations ?? 100;
     this._lnsNeighborhoodSize = parameters.lnsNeighborhoodSize ?? 0.5;
     this._lpBoundsEnabled = parameters.enableLpBounds ?? false;
+    this._lcgEnabled = parameters.enableLcg ?? false;
     this._stats = {
       numConflicts: 0,
       numBranches: 0,
@@ -203,6 +252,7 @@ export class SolverEngine {
       wallTime: 0,
       presolveTime: 0,
       searchTime: 0,
+      numLearnedClauses: 0,
     };
   }
 
@@ -241,6 +291,9 @@ export class SolverEngine {
     this._restartCount = 0;
     this._conflictsSinceRestart = 0;
     this._packingClassification = EMPTY_CLASSIFICATION;
+    this._assignTrail.reset();
+    this._lastConflictLiterals = null;
+    this._rootUnsat = false;
     this._stats = {
       numConflicts: 0,
       numBranches: 0,
@@ -250,6 +303,7 @@ export class SolverEngine {
       wallTime: 0,
       presolveTime: 0,
       searchTime: 0,
+      numLearnedClauses: 0,
     };
 
     // Validate model
@@ -312,6 +366,34 @@ export class SolverEngine {
 
     // Build reverse index for propagation queue optimization
     this._buildVarToConstraintsIndex();
+
+    // LCG: set up the clause database once per solve (post-presolve so unit
+    // clauses force against the tightened domains). When enableLcg is off OR
+    // there are no clauses, the engine stays null (zero overhead); clauses are
+    // still checked at solution completion via _checkAllConstraints.
+    if (this._lcgEnabled && this._model.clauses.length > 0) {
+      this._clauseDb = new ClauseDatabase();
+      this._boolVarSet = new Set(this._model.registry.allBoolVars.map(v => v.index));
+      for (const lits of this._model.clauses) {
+        this._clauseDb.addClause(lits);
+      }
+      // Phase 2: initialize the assignment trail at decision level 0 (root
+      // facts), so setup's unit-forced literals are recorded at level 0.
+      this._assignTrail.reset();
+      this._assignTrail.pushLevel();
+      const setupResult = this._clauseDb.setup(
+        presolveResult.domains,
+        this._reasonTrail,
+        this._isBoolVar,
+        this._onClauseAssign
+      );
+      if (setupResult === 'INFEASIBLE') {
+        this._stats.wallTime = (Date.now() - this._startTime) / 1000;
+        return CpSolverStatus.INFEASIBLE;
+      }
+    } else {
+      this._clauseDb = null;
+    }
 
     // Start search (with optional restarts and LNS)
     const searchStart = Date.now();
@@ -531,6 +613,11 @@ export class SolverEngine {
       return this._solution ? CpSolverStatus.FEASIBLE : CpSolverStatus.UNKNOWN;
     }
 
+    // LCG: root UNSAT short-circuit (1-UIP derived the empty clause at level 0).
+    if (this._rootUnsat) {
+      return CpSolverStatus.INFEASIBLE;
+    }
+
     // Report search progress (throttled by wall-clock time)
     this._maybeLogProgress(depth, domains);
 
@@ -553,6 +640,8 @@ export class SolverEngine {
 
       if (!propagationResult) {
         this._stats.numConflicts++;
+        // LCG Phase 2: analyze the conflict (1-UIP) and learn a clause (ChronoBT).
+        if (this._lcgEnabled) this._analyzeAndLearn();
         return CpSolverStatus.INFEASIBLE;
       }
 
@@ -640,10 +729,17 @@ export class SolverEngine {
 
         domains.pushLevel();
         this._reasonTrail.pushLevel();
+        if (this._lcgEnabled) this._assignTrail.pushLevel();
         try {
           // Fix this variable to the value and recurse.
           domains.set(varIndex, new Domain([value, value]));
+          // LCG: record the decision literal on the assignment trail (bool decisions only).
+          if (this._lcgEnabled && this._isBoolVar(varIndex)) {
+            this._assignTrail.recordDecision(value === 1 ? varIndex : -(varIndex + 1));
+          }
           const status = this._search(domains, depth + 1);
+
+          if (this._rootUnsat) return CpSolverStatus.INFEASIBLE;
 
           if (status === CpSolverStatus.OPTIMAL) {
             if (!this._enumerateAll && !this._hasObjective) {
@@ -652,6 +748,7 @@ export class SolverEngine {
             // Continue searching for better solutions or more solutions
           }
         } finally {
+          if (this._lcgEnabled) this._assignTrail.popLevel();
           this._reasonTrail.popLevel();
           domains.popLevel();
         }
@@ -686,7 +783,17 @@ export class SolverEngine {
       for (const [idx, domain] of initialDomains) {
         domains.set(idx, domain);
       }
+      // LCG: reset the assignment trail to level 0 for the fresh search.
+      if (this._lcgEnabled) {
+        this._assignTrail.reset();
+        this._assignTrail.pushLevel();
+      }
       const status = this._search(domains, 0);
+
+      // LCG: root UNSAT — stop immediately (no solution exists).
+      if (this._rootUnsat) {
+        return CpSolverStatus.INFEASIBLE;
+      }
 
       // Check if we should stop
       if (this._stopped || this._checkTimeLimit()) {
@@ -780,6 +887,12 @@ export class SolverEngine {
       const iterDomains = new TrailMap();
       for (const [idx, domain] of restrictedDomains) {
         iterDomains.set(idx, domain);
+      }
+
+      // LCG: reset the assignment trail to level 0 for this LNS iteration.
+      if (this._lcgEnabled) {
+        this._assignTrail.reset();
+        this._assignTrail.pushLevel();
       }
 
       status = this._search(iterDomains, 0);
@@ -1010,6 +1123,21 @@ export class SolverEngine {
       const constraint = this._model.constraints[i];
       if (!this._checkConstraint(constraint, domains)) {
         return false;
+      }
+    }
+    // Clauses are model constraints too: verify each is satisfied at a complete
+    // assignment. (When enableLcg is on they are also propagated; this check is
+    // the sound backstop and the only enforcement when enableLcg is off.)
+    if (this._model.clauses.length > 0) {
+      for (const lits of this._model.clauses) {
+        let satisfied = false;
+        for (const l of lits) {
+          if (isLitSatisfied(l, domains)) {
+            satisfied = true;
+            break;
+          }
+        }
+        if (!satisfied) return false;
       }
     }
     return true;
@@ -1667,10 +1795,58 @@ export class SolverEngine {
   }
 
   /**
+   * Run the LCG clause engine over the given seed variables. Returns null when
+   * the engine is disabled (zero overhead); otherwise the propagation outcome.
+   * The clause engine's forced assignments go through `domains.set` (re-dirtying
+   * the vars) so the caller's fixpoint loop re-enters — the clause↔CP fixpoint.
+   */
+  private _propagateClauses(domains: TrailMap, seed: ReadonlySet<number>): PropagationOutcome | null {
+    if (!this._lcgEnabled || !this._clauseDb) return null;
+    const outcome = this._clauseDb.propagate(
+      domains,
+      this._reasonTrail,
+      seed,
+      this._isBoolVar,
+      this._onClauseAssign
+    );
+    if (outcome === 'INFEASIBLE') {
+      // Capture the conflict clause literals for 1-UIP analysis.
+      const cid = this._clauseDb.getConflictClauseId();
+      if (cid >= 0) this._lastConflictLiterals = [...this._clauseDb.getClauseLiterals(cid)];
+    }
+    return outcome;
+  }
+
+  /**
+   * LCG Phase 2: analyze the current conflict (1-UIP) and learn a clause.
+   * Called at the conflict site when `_lastConflictLiterals` is set (clause
+   * conflict or an explained Boolean-propagator conflict). Uses ChronoBT — the
+   * learned clause is added; the caller backtracks chronologically as usual.
+   * Sets `_rootUnsat` if the analysis derives the empty clause (level-0 conflict).
+   */
+  private _analyzeAndLearn(): void {
+    if (!this._clauseDb || this._lastConflictLiterals === null) return;
+    const result = analyzeConflict(
+      this._lastConflictLiterals,
+      this._assignTrail,
+      this._clauseDb,
+      this._reasonTrail
+    );
+    if (result === null) return; // conflict not analyzable → plain chronological backtrack
+    this._stats.numLearnedClauses++;
+    if (result.isEmptyClause || result.learnedLiterals.length === 0) {
+      this._rootUnsat = true; // root UNSAT — empty learned clause
+      return;
+    }
+    this._clauseDb.addLearnedClause(result.learnedLiterals);
+  }
+
+  /**
    * Propagate all constraints until fixpoint
    * Returns false if inconsistency detected
    */
   private _propagate(domains: TrailMap): boolean {
+    this._lastConflictLiterals = null;
     let changed = true;
     let iterations = 0;
     // Safety ceiling only: a correct (monotonic) fixpoint converges well below
@@ -1678,6 +1854,14 @@ export class SolverEngine {
     // emitted — never silently. Hitting it signals non-monotonic propagators
     // that should be fixed, not a "consistent" result to trust.
     const maxIterations = 1000;
+
+    // LCG: process incoming dirty (branch decisions / prior propagations) via
+    // clauses BEFORE the first CP pass clears it. The clause engine drains to
+    // its own fixpoint; its forced assignments are then seen by the all-CP pass.
+    {
+      const r = this._propagateClauses(domains, domains.getDirtyVariables());
+      if (r === 'INFEASIBLE') return false;
+    }
 
     // First pass: propagate all constraints
     domains.clearDirty();
@@ -1711,10 +1895,23 @@ export class SolverEngine {
         break;
       }
 
-      // Get dirty variables and clear for this pass
+      // Get dirty variables for this pass. NOTE: clearDirty() is deferred until
+      // AFTER the toPropagate collection below — getDirtyVariables() returns the
+      // live Set, so clearing first would empty it before collection (a latent
+      // bug that made this loop effectively single-pass). The clause engine
+      // (LCG) also reads `dirty` before this clear.
       const dirty = domains.getDirtyVariables();
       if (dirty.size === 0) break;
-      domains.clearDirty();
+
+      // LCG: clause propagation seeded from `dirty`. The clause engine adds its
+      // forced assignments back into `dirty`, so the CP collection below reacts
+      // to them — the clause↔CP mutual fixpoint. clearDirty() runs after that
+      // collection, so both consumers see the same augmented set.
+      {
+        const r = this._propagateClauses(domains, dirty);
+        if (r === 'INFEASIBLE') return false;
+        if (r === 'CHANGED') changed = true;
+      }
 
       // Collect constraints to propagate (deduplicated)
       const toPropagate = new Set<number>();
@@ -1734,6 +1931,8 @@ export class SolverEngine {
           toPropagate.add(i);
         }
       }
+
+      domains.clearDirty();
 
       // Propagate only the affected constraints
       for (const i of toPropagate) {
@@ -2091,12 +2290,16 @@ export class SolverEngine {
       }
     }
 
-    if (falseCount === ct.literals.length) return 'INFEASIBLE';
+    if (falseCount === ct.literals.length) {
+      // Clause (l0 ∨ ... ∨ ln) fully falsified.
+      this._recordBoolConflict(ct.literals.map(l => l.index));
+      return 'INFEASIBLE';
+    }
 
     if (falseCount === ct.literals.length - 1 && lastUnassigned) {
       domains.set(lastUnassigned.index, new Domain([1, 1]));
-      this._reasonTrail.setReason(lastUnassigned.index, { type: 'propagation', constraintIndex: ct.index });
-      this._stats.numBooleanPropagations++;
+      // Explanation = the full clause (l0 ∨ ... ∨ ln).
+      this._recordBoolReason(lastUnassigned.index, 1, ct.index, ct.literals.map(l => l.index));
       return 'CHANGED';
     }
 
@@ -2108,12 +2311,16 @@ export class SolverEngine {
 
     for (const lit of ct.literals) {
       const d = domains.get(lit.index)!;
-      if (d.max === 0) return 'INFEASIBLE';
+      if (d.max === 0) {
+        // Unit clause (li) falsified — li must be true but is false.
+        this._recordBoolConflict([lit.index]);
+        return 'INFEASIBLE';
+      }
 
       if (d.size > 1) {
         domains.set(lit.index, new Domain([1, 1]));
-        this._reasonTrail.setReason(lit.index, { type: 'propagation', constraintIndex: ct.index });
-        this._stats.numBooleanPropagations++;
+        // Explanation = unit clause {li}.
+        this._recordBoolReason(lit.index, 1, ct.index, [lit.index]);
         changed = true;
       }
     }
@@ -2122,28 +2329,28 @@ export class SolverEngine {
   }
 
   private _propagateAtMostOne(ct: AtMostOneConstraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
-    let trueCount = 0;
-    let trueLit: BoolVar | null = null;
-
+    const trueLits: BoolVar[] = [];
     for (const lit of ct.literals) {
       const d = domains.get(lit.index)!;
-      if (d.min === 1) {
-        trueCount++;
-        trueLit = lit;
-      }
+      if (d.min === 1) trueLits.push(lit);
     }
 
-    if (trueCount > 1) return 'INFEASIBLE';
+    if (trueLits.length > 1) {
+      // Pairwise clause (¬li ∨ ¬lj) falsified by two true literals.
+      this._recordBoolConflict([-(trueLits[0].index + 1), -(trueLits[1].index + 1)]);
+      return 'INFEASIBLE';
+    }
 
-    if (trueCount === 1 && trueLit) {
+    if (trueLits.length === 1) {
+      const trueLit = trueLits[0];
       let changed = false;
       for (const lit of ct.literals) {
         if (lit.index === trueLit.index) continue;
         const d = domains.get(lit.index)!;
         if (d.size > 1) {
           domains.set(lit.index, new Domain([0, 0]));
-          this._reasonTrail.setReason(lit.index, { type: 'propagation', constraintIndex: ct.index });
-          this._stats.numBooleanPropagations++;
+          // Explanation = pairwise clause (¬li ∨ ¬lj).
+          this._recordBoolReason(lit.index, 0, ct.index, [-(lit.index + 1), -(trueLit.index + 1)]);
           changed = true;
         }
       }
@@ -2154,28 +2361,36 @@ export class SolverEngine {
   }
 
   private _propagateExactlyOne(ct: ExactlyOneConstraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
-    let trueCount = 0;
+    const trueLits: BoolVar[] = [];
     let falseCount = 0;
     let lastUnassigned: BoolVar | null = null;
 
     for (const lit of ct.literals) {
       const d = domains.get(lit.index)!;
-      if (d.min === 1) trueCount++;
+      if (d.min === 1) trueLits.push(lit);
       else if (d.max === 0) falseCount++;
       else lastUnassigned = lit;
     }
+    const allLits = ct.literals.map(l => l.index); // at-least-one clause (l0 ∨ ... ∨ ln)
 
-    if (trueCount > 1) return 'INFEASIBLE';
-    if (falseCount === ct.literals.length) return 'INFEASIBLE';
+    if (trueLits.length > 1) {
+      this._recordBoolConflict([-(trueLits[0].index + 1), -(trueLits[1].index + 1)]); // (¬li ∨ ¬lj)
+      return 'INFEASIBLE';
+    }
+    if (falseCount === ct.literals.length) {
+      this._recordBoolConflict(allLits); // (l0 ∨ ... ∨ ln)
+      return 'INFEASIBLE';
+    }
 
-    if (trueCount === 1) {
+    if (trueLits.length === 1) {
+      const trueLit = trueLits[0];
       let changed = false;
       for (const lit of ct.literals) {
+        if (lit.index === trueLit.index) continue;
         const d = domains.get(lit.index)!;
         if (d.size > 1) {
           domains.set(lit.index, new Domain([0, 0]));
-          this._reasonTrail.setReason(lit.index, { type: 'propagation', constraintIndex: ct.index });
-          this._stats.numBooleanPropagations++;
+          this._recordBoolReason(lit.index, 0, ct.index, [-(lit.index + 1), -(trueLit.index + 1)]);
           changed = true;
         }
       }
@@ -2184,8 +2399,7 @@ export class SolverEngine {
 
     if (falseCount === ct.literals.length - 1 && lastUnassigned) {
       domains.set(lastUnassigned.index, new Domain([1, 1]));
-      this._reasonTrail.setReason(lastUnassigned.index, { type: 'propagation', constraintIndex: ct.index });
-      this._stats.numBooleanPropagations++;
+      this._recordBoolReason(lastUnassigned.index, 1, ct.index, allLits); // at-least-one
       return 'CHANGED';
     }
 
@@ -2193,7 +2407,13 @@ export class SolverEngine {
   }
 
   /**
-   * Propagate BoolXor: odd number of literals must be true
+   * Propagate BoolXor: odd number of literals must be true.
+   *
+   * NOTE: BoolXor intentionally opts OUT of LCG Phase 2 — it records a legacy
+   * `{type:'propagation'}` reason (not a lazyClause). XOR's clausal explanation
+   * is exponential (2^(n-1) clauses), so conflict analysis cannot resolve
+   * through it; `analyzeConflict` aborts on `{type:'propagation'}` reasons,
+   * falling back to plain chronological backtracking (sound, just no learning).
    */
   private _propagateBoolXor(ct: BoolXorConstraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
     let trueCount = 0;
@@ -2228,27 +2448,33 @@ export class SolverEngine {
   private _propagateImplication(ct: ImplicationConstraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
     const aDomain = domains.get(ct.a.index)!;
     const bDomain = domains.get(ct.b.index)!;
+    // The implication (a → b) is the binary clause (¬a ∨ b).
+    const expl: number[] = [-(ct.a.index + 1), ct.b.index];
 
     let changed = false;
 
     // If a is true, b must be true
     if (aDomain.min === 1) {
-      if (bDomain.max === 0) return 'INFEASIBLE';
+      if (bDomain.max === 0) {
+        this._recordBoolConflict(expl);
+        return 'INFEASIBLE';
+      }
       if (bDomain.size > 1) {
         domains.set(ct.b.index, new Domain([1, 1]));
-        this._reasonTrail.setReason(ct.b.index, { type: 'propagation', constraintIndex: ct.index });
-        this._stats.numBooleanPropagations++;
+        this._recordBoolReason(ct.b.index, 1, ct.index, expl);
         changed = true;
       }
     }
 
     // If b is false, a must be false
     if (bDomain.max === 0) {
-      if (aDomain.min === 1) return 'INFEASIBLE';
+      if (aDomain.min === 1) {
+        this._recordBoolConflict(expl);
+        return 'INFEASIBLE';
+      }
       if (aDomain.size > 1) {
         domains.set(ct.a.index, new Domain([0, 0]));
-        this._reasonTrail.setReason(ct.a.index, { type: 'propagation', constraintIndex: ct.index });
-        this._stats.numBooleanPropagations++;
+        this._recordBoolReason(ct.a.index, 0, ct.index, expl);
         changed = true;
       }
     }
@@ -3272,6 +3498,25 @@ export class SolverEngine {
 
       if (reason.type === 'assumption') {
         assumptionsNeeded.add(reason.assumptionIndex);
+      } else if (reason.type === 'clause') {
+        // Clause propagation: follow the chain through the clause's literals.
+        const lits = this._clauseDb?.getClauseLiterals(reason.clauseId);
+        if (lits) {
+          for (const l of lits) {
+            const idx = litVar(l);
+            if (!visited.has(idx)) {
+              queue.push(idx);
+            }
+          }
+        }
+      } else if (reason.type === 'lazyClause') {
+        // Boolean-propagator explanation: follow the explanation literals.
+        for (const l of reason.literals) {
+          const idx = litVar(l);
+          if (!visited.has(idx)) {
+            queue.push(idx);
+          }
+        }
       } else {
         // Propagation reason: follow the chain to the constraint's variables
         const ct = model.constraints[reason.constraintIndex];

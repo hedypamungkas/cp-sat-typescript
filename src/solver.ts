@@ -272,6 +272,13 @@ export class CpSolver {
   }
 
   /**
+   * Get the number of clauses learned via 1-UIP conflict analysis (LCG Phase 2).
+   */
+  get numLearnedClauses(): number {
+    return this._stats?.numLearnedClauses || 0;
+  }
+
+  /**
    * Get the number of Boolean propagations
    */
   get numBooleanPropagations(): number {
