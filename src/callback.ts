@@ -3,7 +3,8 @@
  * Solution Callback classes
  */
 
-import { LinearExpr, CpSolverStatus, SearchProgressInfo } from './types';
+/* eslint-disable no-console */
+import { SearchProgressInfo } from './types';
 import { IntVarImpl, BoolVarImpl } from './variables';
 
 // ============================================================================

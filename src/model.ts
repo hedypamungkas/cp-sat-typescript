@@ -10,7 +10,6 @@ import {
   LinearExpressionData,
   BoundedLinearExpression,
   NotEqualExpression,
-  CpSolverStatus,
   VariableSelectionStrategy,
   DomainReductionStrategy,
   BoolVar,
@@ -1563,6 +1562,7 @@ export class CpModel {
     };
 
     // Reconstruct constraints
+    /* eslint-disable @typescript-eslint/no-non-null-assertion */
     for (const cd of json.constraints) {
       switch (cd.type) {
         case 'LINEAR': {
@@ -1702,6 +1702,7 @@ export class CpModel {
       }
     }
 
+    /* eslint-enable @typescript-eslint/no-non-null-assertion */
     // Reconstruct objective
     if (json.objective) {
       model._objective = CpModel._exprFromData(json.objective.expr, model._registry);

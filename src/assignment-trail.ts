@@ -15,6 +15,7 @@
  * The trail is the SOLVER's responsibility (it already owns `TrailMap` and
  * `ReasonTrail`); the clause engine stays stateless for propagation.
  */
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 
 import type { Literal } from './clause-engine';
 

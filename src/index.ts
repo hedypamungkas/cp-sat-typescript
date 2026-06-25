@@ -198,6 +198,8 @@ export type { Literal, ClauseId, PropagationOutcome, OnAssignCallback } from './
 export { AssignmentTrail } from './assignment-trail';
 export { analyzeConflict } from './conflict-analysis';
 export type { AnalysisResult } from './conflict-analysis';
+export { BoundLiteralRegistry } from './bound-literal-registry';
+export type { BoundDir, BoundLitInfo } from './bound-literal-registry';
 
 // ============================================================================
 // Version

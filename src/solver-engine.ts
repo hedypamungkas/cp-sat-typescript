@@ -3,9 +3,10 @@
  * Solver Engine - Backtracking search with constraint propagation and branch-and-bound
  */
 
-import { Domain, LinearExpr, CpSolverStatus, BoolVar, IntVar, SolverParameters, SearchProgressInfo, Reason } from './types';
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
+import { Domain, LinearExpr, CpSolverStatus, BoolVar, IntVar, SolverParameters, SearchProgressInfo } from './types';
 import { TrailMap, ReasonTrail } from './trail';
-import { IntVarImpl, BoolVarImpl, IntervalVarImpl } from './variables';
+import { IntervalVarImpl } from './variables';
 import {
   Constraint,
   LinearConstraint,
@@ -45,6 +46,7 @@ import { ClauseDatabase, litVar, isLitSatisfied } from './clause-engine';
 import type { PropagationOutcome } from './clause-engine';
 import { AssignmentTrail } from './assignment-trail';
 import { analyzeConflict } from './conflict-analysis';
+import { BoundLiteralRegistry } from './bound-literal-registry';
 import {
   propagateNoOverlap,
   propagateNoOverlapDetectable,
@@ -83,6 +85,7 @@ export interface SolverStats {
   presolveTime: number;
   searchTime: number;
   numLearnedClauses: number;
+  numIntBoundLiterals: number;
 }
 
 // ============================================================================
@@ -171,7 +174,6 @@ export class SolverEngine {
 
   // Restart state
   private _restartCount: number = 0;
-  private _conflictsSinceRestart: number = 0;
   private _restartBaseInterval: number = 256;
   private _restartEnabled: boolean = false;
 
@@ -198,8 +200,13 @@ export class SolverEngine {
   private _lastConflictLiterals: number[] | null = null;
   /** Set true when conflict analysis derives the empty clause (root UNSAT). */
   private _rootUnsat = false;
+  // LCG Phase 3: integer bound-literal registry (x ≥ k / x ≤ k as synthetic bools).
+  private _boundLitReg: BoundLiteralRegistry | null = null;
   // Reused callbacks for the clause engine (avoid per-call closure allocation).
-  private readonly _isBoolVar = (idx: number): boolean => this._boolVarSet.has(idx);
+  // Phase 3: _isBoolVar also covers synthetic bound-literal indices so the clause
+  // engine seeds + propagates them correctly.
+  private readonly _isBoolVar = (idx: number): boolean =>
+    this._boolVarSet.has(idx) || (this._boundLitReg?.isBoundLit(idx) ?? false);
   private readonly _onClauseAssign = (lit: number): void => {
     this._stats.numBooleanPropagations++;
     this._assignTrail.recordPropagation(lit);
@@ -253,6 +260,7 @@ export class SolverEngine {
       presolveTime: 0,
       searchTime: 0,
       numLearnedClauses: 0,
+      numIntBoundLiterals: 0,
     };
   }
 
@@ -289,7 +297,6 @@ export class SolverEngine {
     this._bestObjective = options?.initialBestObjective ?? null;
     this._searchExhausted = true;
     this._restartCount = 0;
-    this._conflictsSinceRestart = 0;
     this._packingClassification = EMPTY_CLASSIFICATION;
     this._assignTrail.reset();
     this._lastConflictLiterals = null;
@@ -304,6 +311,7 @@ export class SolverEngine {
       presolveTime: 0,
       searchTime: 0,
       numLearnedClauses: 0,
+      numIntBoundLiterals: 0,
     };
 
     // Validate model
@@ -393,6 +401,19 @@ export class SolverEngine {
       }
     } else {
       this._clauseDb = null;
+    }
+
+    // LCG Phase 3: initialize the bound-literal registry when LCG is active.
+    // The registry's synthetic indices start above all real variable indices so
+    // they are disjoint from model variables.
+    if (this._lcgEnabled) {
+      let maxVarIndex = 0;
+      for (const [idx] of presolveResult.domains) {
+        if (idx > maxVarIndex) maxVarIndex = idx;
+      }
+      this._boundLitReg = new BoundLiteralRegistry(maxVarIndex + 1);
+    } else {
+      this._boundLitReg = null;
     }
 
     // Start search (with optional restarts and LNS)
@@ -733,9 +754,18 @@ export class SolverEngine {
         try {
           // Fix this variable to the value and recurse.
           domains.set(varIndex, new Domain([value, value]));
-          // LCG: record the decision literal on the assignment trail (bool decisions only).
-          if (this._lcgEnabled && this._isBoolVar(varIndex)) {
-            this._assignTrail.recordDecision(value === 1 ? varIndex : -(varIndex + 1));
+          // LCG: record the decision literal on the assignment trail.
+          if (this._lcgEnabled) {
+            if (this._boolVarSet.has(varIndex)) {
+              // Real boolean variable — record as positive/negative literal.
+              this._assignTrail.recordDecision(value === 1 ? varIndex : -(varIndex + 1));
+            } else if (this._boundLitReg && !this._boundLitReg.isBoundLit(varIndex)) {
+              // Integer variable — record as a "leq" bound literal if already allocated.
+              const existing = this._boundLitReg.getExisting(varIndex, value, 'leq');
+              if (existing !== undefined) {
+                this._assignTrail.recordDecision(existing);
+              }
+            }
           }
           const status = this._search(domains, depth + 1);
 
@@ -813,7 +843,6 @@ export class SolverEngine {
       // Check if we should restart (conflict threshold reached)
       if (this._stats.numConflicts >= conflictThreshold) {
         this._restartCount++;
-        this._conflictsSinceRestart = 0;
         // Continue to next restart
       } else {
         // Search completed without hitting conflict threshold — done
@@ -934,6 +963,8 @@ export class SolverEngine {
     for (const [index, domain] of domains) {
       // Skip derived variables — they don't need to be assigned during search
       if (this._derivedVars && this._derivedVars.has(index)) continue;
+      // Skip synthetic bound-literal variables — they're determined by channeling
+      if (this._boundLitReg?.isBoundLit(index)) continue;
       if (domain.size > 1) return false;
     }
     return true;
@@ -975,6 +1006,8 @@ export class SolverEngine {
       if (domain.size <= 1) continue; // Already assigned
       // Skip derived variables — their values are computed from base variables
       if (this._derivedVars && this._derivedVars.has(index)) continue;
+      // Skip synthetic bound-literal variables — not part of the search space
+      if (this._boundLitReg?.isBoundLit(index)) continue;
 
       if (domain.size < bestSize) {
         bestSize = domain.size;
@@ -1104,7 +1137,7 @@ export class SolverEngine {
           parts.push(`gap: ${gapPercent.toFixed(1)}%`);
         }
       }
-      console.log(parts.join('  '));
+      console.warn(parts.join('  '));
     }
 
     if (this._progressCallback) {
@@ -1515,9 +1548,6 @@ export class SolverEngine {
     const intervals: { start: number; end: number }[] = [];
 
     for (const iv of ct.intervals) {
-      const startD = domains.get(iv.start.vars[0]?.index ?? -1);
-      const endD = domains.get(iv.end.vars[0]?.index ?? -1);
-
       // Try to evaluate start and end
       const startVal = this._evaluateExpression(iv.start, domains);
       const endVal = this._evaluateExpression(iv.end, domains);
@@ -1842,6 +1872,129 @@ export class SolverEngine {
   }
 
   /**
+   * LCG Phase 3: bidirectional channeling between integer variable domains and
+   * their associated synthetic bound literals (x ≥ k / x ≤ k).
+   *
+   * Forward  (int → S): if the integer domain already satisfies (or violates)
+   *   the bound, force the bound literal to 1 (or 0).
+   * Backward (S → int): if a clause or prior inference forced the bound literal,
+   *   tighten the integer domain accordingly.
+   *
+   * Returns false on infeasibility (empty domain after tightening).
+   */
+  private _propagateBoundLiterals(domains: TrailMap): boolean {
+    const reg = this._boundLitReg;
+    if (!reg) return true;
+
+    for (const [synthIdx, info] of reg.allEntries()) {
+      const synthD = domains.get(synthIdx);
+      if (!synthD || synthD.isEmpty) continue; // not initialized or reverted
+
+      const intD = domains.get(info.varIndex);
+      if (!intD || intD.isEmpty) continue;
+
+      if (info.dir === 'geq') {
+        // Forward: x ≥ k provably true → force S = 1
+        if (intD.min >= info.bound && synthD.min !== 1) {
+          domains.set(synthIdx, new Domain([1, 1]));
+          this._reasonTrail.setReason(synthIdx, { type: 'propagation', constraintIndex: -1 });
+          this._assignTrail.recordPropagation(synthIdx);
+        }
+        // Forward: x ≥ k provably false → force S = 0
+        else if (intD.max < info.bound && synthD.max !== 0) {
+          domains.set(synthIdx, new Domain([0, 0]));
+          this._reasonTrail.setReason(synthIdx, { type: 'propagation', constraintIndex: -1 });
+          this._assignTrail.recordPropagation(-(synthIdx + 1));
+        }
+
+        // Re-read after potential forward update
+        const sd = domains.get(synthIdx)!;
+        // Backward: S = 1 → x ≥ k
+        if (sd.min === 1 && intD.min < info.bound) {
+          const newD = intD.greaterOrEqual(info.bound);
+          if (newD.isEmpty) return false;
+          domains.set(info.varIndex, newD);
+          this._reasonTrail.setReason(info.varIndex, { type: 'propagation', constraintIndex: -1 });
+        }
+        // Backward: S = 0 → x < k → x ≤ k − 1
+        else if (sd.max === 0 && intD.max >= info.bound) {
+          const newD = intD.lessOrEqual(info.bound - 1);
+          if (newD.isEmpty) return false;
+          domains.set(info.varIndex, newD);
+          this._reasonTrail.setReason(info.varIndex, { type: 'propagation', constraintIndex: -1 });
+        }
+      } else {
+        // dir === 'leq'
+        // Forward: x ≤ k provably true → force S = 1
+        if (intD.max <= info.bound && synthD.min !== 1) {
+          domains.set(synthIdx, new Domain([1, 1]));
+          this._reasonTrail.setReason(synthIdx, { type: 'propagation', constraintIndex: -1 });
+          this._assignTrail.recordPropagation(synthIdx);
+        }
+        // Forward: x ≤ k provably false → force S = 0
+        else if (intD.min > info.bound && synthD.max !== 0) {
+          domains.set(synthIdx, new Domain([0, 0]));
+          this._reasonTrail.setReason(synthIdx, { type: 'propagation', constraintIndex: -1 });
+          this._assignTrail.recordPropagation(-(synthIdx + 1));
+        }
+
+        const sd = domains.get(synthIdx)!;
+        // Backward: S = 1 → x ≤ k
+        if (sd.min === 1 && intD.max > info.bound) {
+          const newD = intD.lessOrEqual(info.bound);
+          if (newD.isEmpty) return false;
+          domains.set(info.varIndex, newD);
+          this._reasonTrail.setReason(info.varIndex, { type: 'propagation', constraintIndex: -1 });
+        }
+        // Backward: S = 0 → x > k → x ≥ k + 1
+        else if (sd.max === 0 && intD.min <= info.bound) {
+          const newD = intD.greaterOrEqual(info.bound + 1);
+          if (newD.isEmpty) return false;
+          domains.set(info.varIndex, newD);
+          this._reasonTrail.setReason(info.varIndex, { type: 'propagation', constraintIndex: -1 });
+        }
+      }
+    }
+    return true;
+  }
+
+  /**
+   * LCG Phase 3: record a scheduling-propagated integer bound tightening as a
+   * bound literal with a lazyClause reason.
+   *
+   * Called from `_propagateLinearCallback` after a scheduling propagator fires.
+   * `anteLits` are the NEGATED antecedent literals from the `explain` lambda
+   * (all currently FALSE). The full nogood clause adds `synthIdx` (the forced
+   * literal) at the end.
+   */
+  private _recordIntBoundReason(
+    varIndex: number,
+    bound: number,
+    dir: 'geq' | 'leq',
+    anteLits: number[],
+    domains: TrailMap
+  ): void {
+    const reg = this._boundLitReg;
+    if (!reg) return;
+    const synthIdx = reg.getOrCreate(varIndex, bound, dir, domains);
+    // Skip if a reason is already recorded for this bound literal (idempotent).
+    // NOTE: we check the reason trail, NOT the domain: getOrCreate may have
+    // initialized the domain to [1,1] when the int-var already satisfied the
+    // bound, but that does not mean the lazyClause explanation was recorded yet.
+    if (this._reasonTrail.getReason(synthIdx) !== undefined) return;
+    // Ensure domain is forced to TRUE.
+    const synthD = domains.get(synthIdx);
+    if (!synthD || synthD.min !== 1) {
+      domains.set(synthIdx, new Domain([1, 1]));
+    }
+    // Full clause: negated antecedents + the forced literal.
+    const fullClause = [...anteLits, synthIdx];
+    this._reasonTrail.setReason(synthIdx, { type: 'lazyClause', literals: fullClause });
+    this._assignTrail.recordPropagation(synthIdx);
+    this._stats.numIntBoundLiterals++;
+  }
+
+  /**
    * Propagate all constraints until fixpoint
    * Returns false if inconsistency detected
    */
@@ -1862,6 +2015,8 @@ export class SolverEngine {
       const r = this._propagateClauses(domains, domains.getDirtyVariables());
       if (r === 'INFEASIBLE') return false;
     }
+    // Phase 3: channel bound literals ↔ integer domains.
+    if (!this._propagateBoundLiterals(domains)) return false;
 
     // First pass: propagate all constraints
     domains.clearDirty();
@@ -1879,7 +2034,7 @@ export class SolverEngine {
     }
 
     // Check for empty domains
-    for (const [_index, domain] of domains) {
+    for (const [, domain] of domains) {
       if (domain.isEmpty) return false;
     }
 
@@ -1912,6 +2067,8 @@ export class SolverEngine {
         if (r === 'INFEASIBLE') return false;
         if (r === 'CHANGED') changed = true;
       }
+      // Phase 3: channel bound literals ↔ integer domains (after each clause pass).
+      if (!this._propagateBoundLiterals(domains)) return false;
 
       // Collect constraints to propagate (deduplicated)
       const toPropagate = new Set<number>();
@@ -1947,7 +2104,7 @@ export class SolverEngine {
       }
 
       // Check for empty domains
-      for (const [_index, domain] of domains) {
+      for (const [, domain] of domains) {
         if (domain.isEmpty) return false;
       }
     }
@@ -2417,14 +2574,12 @@ export class SolverEngine {
    */
   private _propagateBoolXor(ct: BoolXorConstraint, domains: Map<number, Domain>): 'CHANGED' | 'CONSISTENT' | 'INFEASIBLE' {
     let trueCount = 0;
-    let falseCount = 0;
     const unassigned: BoolVar[] = [];
 
     for (const lit of ct.literals) {
       const d = domains.get(lit.index)!;
       if (d.min === 1) trueCount++;
-      else if (d.max === 0) falseCount++;
-      else unassigned.push(lit);
+      else if (d.max > 0) unassigned.push(lit);
     }
 
     // If all assigned, check XOR
@@ -2772,7 +2927,6 @@ export class SolverEngine {
     }
 
     // target range must intersect with [|expr_min|, |expr_max|] (rough bounds)
-    const absMin = Math.min(Math.abs(exprDomain.min), Math.abs(exprDomain.max));
     const absMax = Math.max(Math.abs(exprDomain.min), Math.abs(exprDomain.max));
 
     // If expr can be both positive and negative, absMin might be 0
@@ -3031,6 +3185,10 @@ export class SolverEngine {
   /**
    * Adapter: delegate linear constraint propagation to _propagateLinear.
    * Converts the simple (vars, coeffs, lb, ub) interface to a LinearConstraint.
+   *
+   * When `explain` is provided AND LCG + bound-literal registry are active,
+   * records a lazyClause reason for every variable bound tightened — the core
+   * of LCG Phase 3's integer-explanation machinery.
    */
   private _propagateLinearCallback(
     vars: IntVar[],
@@ -3038,11 +3196,45 @@ export class SolverEngine {
     lb: number,
     ub: number,
     domains: Map<number, Domain>,
-    parentConstraintIndex: number = -1
+    parentConstraintIndex: number = -1,
+    explain?: () => number[] | null
   ): PropagationResult {
+    if (!explain || !this._lcgEnabled || !this._boundLitReg) {
+      // Fast path: no LCG explanation — just run propagation.
+      const bounds = new Domain([lb, ub]);
+      const ct = new LinearConstraint(parentConstraintIndex, vars, coeffs, bounds);
+      return this._propagateLinear(ct, domains);
+    }
+
+    // LCG explain path: snapshot lower/upper bounds, propagate, detect changes.
+    const prev = new Map<number, { min: number; max: number }>();
+    for (const v of vars) {
+      const d = domains.get(v.index);
+      if (d) prev.set(v.index, { min: d.min, max: d.max });
+    }
+
     const bounds = new Domain([lb, ub]);
     const ct = new LinearConstraint(parentConstraintIndex, vars, coeffs, bounds);
-    return this._propagateLinear(ct, domains);
+    const result = this._propagateLinear(ct, domains);
+
+    if (result === 'CHANGED') {
+      const anteLits = explain();
+      if (anteLits !== null) {
+        for (const v of vars) {
+          const p = prev.get(v.index);
+          const curr = domains.get(v.index);
+          if (!p || !curr) continue;
+          if (curr.min > p.min) {
+            this._recordIntBoundReason(v.index, curr.min, 'geq', anteLits, domains as TrailMap);
+          }
+          if (curr.max < p.max) {
+            this._recordIntBoundReason(v.index, curr.max, 'leq', anteLits, domains as TrailMap);
+          }
+        }
+      }
+    }
+
+    return result;
   }
 
   /**
@@ -3052,19 +3244,25 @@ export class SolverEngine {
     ct: NoOverlapConstraint,
     domains: Map<number, Domain>
   ): PropagationResult {
-    const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d) =>
-      this._propagateLinearCallback(vars, coeffs, lb, ub, d, ct.index);
+    const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d, _pci, explain) =>
+      this._propagateLinearCallback(vars, coeffs, lb, ub, d, ct.index, explain);
 
-    const result = propagateNoOverlap(ct, domains, linFn);
+    // LCG Phase 3: bound-literal allocator closure for explain lambdas.
+    const alloc = (this._lcgEnabled && this._boundLitReg)
+      ? (vi: number, b: number, dir: 'geq' | 'leq'): number =>
+          this._boundLitReg!.getOrCreate(vi, b, dir, domains)
+      : null;
+
+    const result = propagateNoOverlap(ct, domains, linFn, alloc);
     if (result === 'INFEASIBLE') return 'INFEASIBLE';
 
-    const result2 = propagateNoOverlapDetectable(ct, domains, linFn);
+    const result2 = propagateNoOverlapDetectable(ct, domains, linFn, alloc);
     if (result2 === 'INFEASIBLE') return 'INFEASIBLE';
 
-    const result3 = propagateNoOverlapNotLast(ct, domains, linFn);
+    const result3 = propagateNoOverlapNotLast(ct, domains, linFn, alloc);
     if (result3 === 'INFEASIBLE') return 'INFEASIBLE';
 
-    const result4 = propagateNoOverlapEdgeFinding(ct, domains, linFn);
+    const result4 = propagateNoOverlapEdgeFinding(ct, domains, linFn, alloc);
     if (result4 === 'INFEASIBLE') return 'INFEASIBLE';
 
     if (result === 'CHANGED' || result2 === 'CHANGED' || result3 === 'CHANGED' || result4 === 'CHANGED') {
@@ -3080,13 +3278,18 @@ export class SolverEngine {
     ct: CumulativeConstraint,
     domains: Map<number, Domain>
   ): PropagationResult {
-    const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d) =>
-      this._propagateLinearCallback(vars, coeffs, lb, ub, d, ct.index);
+    const linFn: LinearPropagateFn = (vars, coeffs, lb, ub, d, _pci, explain) =>
+      this._propagateLinearCallback(vars, coeffs, lb, ub, d, ct.index, explain);
 
-    const result = propagateCumulativeTimeTable(ct, domains, linFn);
+    const alloc = (this._lcgEnabled && this._boundLitReg)
+      ? (vi: number, b: number, dir: 'geq' | 'leq'): number =>
+          this._boundLitReg!.getOrCreate(vi, b, dir, domains)
+      : null;
+
+    const result = propagateCumulativeTimeTable(ct, domains, linFn, alloc);
     if (result === 'INFEASIBLE') return 'INFEASIBLE';
 
-    const result2 = propagateCumulativeEdgeFinding(ct, domains, linFn);
+    const result2 = propagateCumulativeEdgeFinding(ct, domains, linFn, alloc);
     if (result2 === 'INFEASIBLE') return 'INFEASIBLE';
 
     if (result === 'CHANGED' || result2 === 'CHANGED') {

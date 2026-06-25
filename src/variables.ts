@@ -3,7 +3,7 @@
  * Variable classes for the constraint programming solver
  */
 
-import { Domain, LinearExpr, IntVar, BoolVar, IntervalVar, IntVarWithOps, createVarProxy } from './types';
+import { Domain, LinearExpr, BoolVar, IntervalVar, IntVarWithOps, createVarProxy } from './types';
 
 // ============================================================================
 // Variable Registry

@@ -3,7 +3,8 @@
  * CpSolver - The main solver class
  */
 
-import { LinearExpr, CpSolverStatus, SolverParameters, SolverStatistics } from './types';
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
+import { LinearExpr, CpSolverStatus, SolverParameters } from './types';
 import { IntVarImpl, BoolVarImpl } from './variables';
 import { CpModel } from './model';
 import { SolverEngine, SolverStats } from './solver-engine';
@@ -276,6 +277,14 @@ export class CpSolver {
    */
   get numLearnedClauses(): number {
     return this._stats?.numLearnedClauses || 0;
+  }
+
+  /**
+   * Get the number of integer bound literals recorded with lazyClause reasons
+   * (LCG Phase 3 — scheduling explanation events).
+   */
+  get numIntBoundLiterals(): number {
+    return this._stats?.numIntBoundLiterals || 0;
   }
 
   /**

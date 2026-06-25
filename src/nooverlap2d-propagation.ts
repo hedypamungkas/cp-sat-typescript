@@ -10,6 +10,7 @@
  *
  * Based on OR-Tools diffn_util.h and Beldiceanu & Poder (2008).
  */
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 
 import { Domain, LinearExpr, IntVar, IntervalVar } from './types';
 import { NoOverlap2DConstraint } from './constraints';

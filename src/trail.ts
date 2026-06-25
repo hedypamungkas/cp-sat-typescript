@@ -1,4 +1,5 @@
 import { Domain, Reason } from './types';
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 
 /**
  * A Map<number, Domain> that records every mutation on an undo trail, so the

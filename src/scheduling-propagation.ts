@@ -11,8 +11,9 @@
  * - Carlier & Pinson (1994), Baptiste et al. (2001), Vilim (2011)
  */
 
-import { Domain, LinearExpr, IntVar, IntervalVar, BoolVar } from './types';
+import { Domain, LinearExpr, IntVar, IntervalVar } from './types';
 import { NoOverlapConstraint, CumulativeConstraint, ReservoirConstraint } from './constraints';
+/* eslint-disable @typescript-eslint/no-non-null-assertion */
 
 // ============================================================================
 // Types
@@ -39,8 +40,16 @@ export type LinearPropagateFn = (
   lb: number,
   ub: number,
   domains: Map<number, Domain>,
-  parentConstraintIndex?: number
+  parentConstraintIndex?: number,
+  /** LCG Phase 3: optional explanation lambda (returns antecedent negated literals) */
+  explain?: () => number[] | null
 ) => PropagationResult;
+
+/**
+ * LCG Phase 3: allocates or retrieves a bound literal synthIdx for a given
+ * (varIndex, bound, direction) triple. Passed as a closure from the engine.
+ */
+export type AllocBoundLitFn = (varIndex: number, bound: number, dir: 'geq' | 'leq') => number;
 
 // ============================================================================
 // Helpers
@@ -163,52 +172,63 @@ function tightenUB(
 
 /**
  * Tighten start variable domain: start >= newMin.
- * For simple vars, directly tighten. For complex expressions, delegate.
+ *
+ * When `explain` is provided (LCG Phase 3), always delegates through
+ * `propagateLinear` so the engine can record a bound-literal reason.
+ * Without an explain lambda, uses the fast path (direct tightenLB) for
+ * simple-variable starts, delegating only for complex expressions.
  */
 function tightenStartMin(
   task: IntervalBounds,
   newMin: number,
   domains: Map<number, Domain>,
-  propagateLinear: LinearPropagateFn
+  propagateLinear: LinearPropagateFn,
+  explain?: () => number[] | null
 ): boolean {
   if (newMin <= task.startMin) return false;
-  const simpleVar = getSimpleVar(task.iv.start);
-  if (simpleVar) {
-    return tightenLB(domains, simpleVar.index, newMin);
+  if (explain === undefined) {
+    // Fast path: no LCG explanation needed
+    const simpleVar = getSimpleVar(task.iv.start);
+    if (simpleVar) return tightenLB(domains, simpleVar.index, newMin);
   }
-  // Delegate: start >= newMin => sum(vars*coeffs) + offset >= newMin
   const result = propagateLinear(
     task.iv.start.vars,
     task.iv.start.coeffs,
     newMin - task.iv.start.offset,
     Infinity,
-    domains
+    domains,
+    undefined,
+    explain
   );
   return result === 'CHANGED';
 }
 
 /**
  * Tighten end variable domain: end <= newMax.
- * For simple vars, directly tighten. For complex expressions, delegate.
+ *
+ * Same fast-path / explain-path split as tightenStartMin.
  */
 function tightenEndMax(
   task: IntervalBounds,
   newMax: number,
   domains: Map<number, Domain>,
-  propagateLinear: LinearPropagateFn
+  propagateLinear: LinearPropagateFn,
+  explain?: () => number[] | null
 ): boolean {
   if (newMax >= task.endMax) return false;
-  const simpleVar = getSimpleVar(task.iv.end);
-  if (simpleVar) {
-    return tightenUB(domains, simpleVar.index, newMax);
+  if (explain === undefined) {
+    // Fast path: no LCG explanation needed
+    const simpleVar = getSimpleVar(task.iv.end);
+    if (simpleVar) return tightenUB(domains, simpleVar.index, newMax);
   }
-  // Delegate: end <= newMax => sum(vars*coeffs) + offset <= newMax
   const result = propagateLinear(
     task.iv.end.vars,
     task.iv.end.coeffs,
     -Infinity,
     newMax - task.iv.end.offset,
-    domains
+    domains,
+    undefined,
+    explain
   );
   return result === 'CHANGED';
 }
@@ -250,7 +270,8 @@ function buildContiguousWindows(tasks: IntervalBounds[]): IntervalBounds[][] {
 export function propagateNoOverlap(
   ct: NoOverlapConstraint,
   domains: Map<number, Domain>,
-  propagateLinear: LinearPropagateFn
+  propagateLinear: LinearPropagateFn,
+  allocBoundLit?: AllocBoundLitFn | null
 ): PropagationResult {
   const tasks: IntervalBounds[] = [];
   for (const iv of ct.intervals) {
@@ -289,9 +310,18 @@ export function propagateNoOverlap(
         // If A must start before B finishes, and A has a mandatory part,
         // then B must start after A's mandatory end
         if (a.startMax < b.endMin) {
-          // B must start after A finishes
+          // B must start after A finishes.
+          // LCG explain: A's mandatory part [a.startMax, a.endMin) forces B.
+          const aStartVar = allocBoundLit ? getSimpleVar(a.iv.start) : null;
+          const aEndVar = allocBoundLit ? getSimpleVar(a.iv.end) : null;
+          const explainBAfterA = (allocBoundLit && aStartVar && aEndVar)
+            ? (): number[] | null => {
+              const s1 = allocBoundLit(aStartVar.index, a.startMax, 'leq');
+              const s2 = allocBoundLit(aEndVar.index, a.endMin, 'geq');
+              return [-(s1 + 1), -(s2 + 1)];
+            } : undefined;
           try {
-            if (tightenStartMin(b, a.endMin, domains, propagateLinear)) {
+            if (tightenStartMin(b, a.endMin, domains, propagateLinear, explainBAfterA)) {
               changed = true;
             }
           } catch {
@@ -301,8 +331,16 @@ export function propagateNoOverlap(
 
         // Symmetric: if B must start before A finishes
         if (b.startMax < a.endMin) {
+          const bStartVar = allocBoundLit ? getSimpleVar(b.iv.start) : null;
+          const bEndVar = allocBoundLit ? getSimpleVar(b.iv.end) : null;
+          const explainAAfterB = (allocBoundLit && bStartVar && bEndVar)
+            ? (): number[] | null => {
+              const s1 = allocBoundLit(bStartVar.index, b.startMax, 'leq');
+              const s2 = allocBoundLit(bEndVar.index, b.endMin, 'geq');
+              return [-(s1 + 1), -(s2 + 1)];
+            } : undefined;
           try {
-            if (tightenStartMin(a, b.endMin, domains, propagateLinear)) {
+            if (tightenStartMin(a, b.endMin, domains, propagateLinear, explainAAfterB)) {
               changed = true;
             }
           } catch {
@@ -335,7 +373,8 @@ interface ProfileEvent {
 export function propagateCumulativeTimeTable(
   ct: CumulativeConstraint,
   domains: Map<number, Domain>,
-  propagateLinear: LinearPropagateFn
+  propagateLinear: LinearPropagateFn,
+  _allocBoundLit?: AllocBoundLitFn | null
 ): PropagationResult {
   // Extract capacity bounds
   const capBounds = getExprBounds(ct.capacity, domains);
@@ -489,7 +528,8 @@ export function propagateCumulativeTimeTable(
 export function propagateNoOverlapDetectable(
   ct: NoOverlapConstraint,
   domains: Map<number, Domain>,
-  propagateLinear: LinearPropagateFn
+  propagateLinear: LinearPropagateFn,
+  allocBoundLit?: AllocBoundLitFn | null
 ): PropagationResult {
   const tasks: IntervalBounds[] = [];
   for (const iv of ct.intervals) {
@@ -536,8 +576,31 @@ export function propagateNoOverlapDetectable(
     }
 
     if (maxEndMinOfPredecessors > entry.task.startMin) {
+      // LCG explain: the predecessor with the highest endMin is the binding witness.
+      let bindingStartVar: ReturnType<typeof getSimpleVar> = null;
+      let bindingEndVar: ReturnType<typeof getSimpleVar> = null;
+      let bindingStartMax = 0;
+      const bindingEndMin = maxEndMinOfPredecessors;
+      if (allocBoundLit) {
+        for (const other of ranked) {
+          if (other === entry || other.rank >= entry.rank) continue;
+          if (other.task.endMin === maxEndMinOfPredecessors) {
+            bindingStartVar = getSimpleVar(other.task.iv.start);
+            bindingEndVar = getSimpleVar(other.task.iv.end);
+            bindingStartMax = other.task.startMax;
+            break;
+          }
+        }
+      }
+      const explainDetectable = (allocBoundLit && bindingStartVar && bindingEndVar)
+        ? (): number[] | null => {
+          // Antecedents: binding predecessor's mandatory part.
+          const s1 = allocBoundLit(bindingStartVar!.index, bindingStartMax, 'leq');
+          const s2 = allocBoundLit(bindingEndVar!.index, bindingEndMin, 'geq');
+          return [-(s1 + 1), -(s2 + 1)];
+        } : undefined;
       try {
-        if (tightenStartMin(entry.task, maxEndMinOfPredecessors, domains, propagateLinear)) {
+        if (tightenStartMin(entry.task, maxEndMinOfPredecessors, domains, propagateLinear, explainDetectable)) {
           changed = true;
         }
       } catch {
@@ -562,7 +625,8 @@ export function propagateNoOverlapDetectable(
 export function propagateNoOverlapNotLast(
   ct: NoOverlapConstraint,
   domains: Map<number, Domain>,
-  propagateLinear: LinearPropagateFn
+  propagateLinear: LinearPropagateFn,
+  allocBoundLit?: AllocBoundLitFn | null
 ): PropagationResult {
   const tasks: IntervalBounds[] = [];
   for (const iv of ct.intervals) {
@@ -615,9 +679,25 @@ export function propagateNoOverlapNotLast(
           return 'INFEASIBLE';
         }
 
-        // Decrease endMax of task
+        // Decrease endMax of task.
+        // LCG explain: others' startMin bounds pack past task's startMax.
+        const taskStartVar = allocBoundLit ? getSimpleVar(task.iv.start) : null;
+        const capturedOthers = others;
+        const capturedTaskStartMax = task.startMax;
+        const explainNotLast = (allocBoundLit && taskStartVar)
+          ? (): number[] | null => {
+            const lits: number[] = [];
+            // task's latest-start bound (mandatory part witness)
+            lits.push(-(allocBoundLit(taskStartVar.index, capturedTaskStartMax, 'leq') + 1));
+            for (const t of capturedOthers) {
+              const tSv = getSimpleVar(t.iv.start);
+              if (!tSv) return null;
+              lits.push(-(allocBoundLit(tSv.index, t.startMin, 'geq') + 1));
+            }
+            return lits;
+          } : undefined;
         try {
-          if (tightenEndMax(task, latestFollowingStart, domains, propagateLinear)) {
+          if (tightenEndMax(task, latestFollowingStart, domains, propagateLinear, explainNotLast)) {
             changed = true;
           }
         } catch {
@@ -660,7 +740,8 @@ export function propagateNoOverlapNotLast(
 export function propagateNoOverlapEdgeFinding(
   ct: NoOverlapConstraint,
   domains: Map<number, Domain>,
-  propagateLinear: LinearPropagateFn
+  propagateLinear: LinearPropagateFn,
+  allocBoundLit?: AllocBoundLitFn | null
 ): PropagationResult {
   const tasks: IntervalBounds[] = [];
   for (const iv of ct.intervals) {
@@ -702,6 +783,7 @@ export function propagateNoOverlapEdgeFinding(
     const pI = taskI.sizeMin;
 
     let bestBound = estI;
+    let kBest = -1; // index in byLct of the last task in the best Ω prefix
     let estMinPref = Infinity;
     let pPref = 0;
     for (let k = 0; k < byLct.length; k++) {
@@ -713,13 +795,33 @@ export function propagateNoOverlapEdgeFinding(
       // Qualifying: est(Ω ∪ {i}) + p(Ω ∪ {i}) > lct(Ω)?
       if (Math.min(estMinPref, estI) + (pPref + pI) > lctOmega) {
         const cand = estMinPref + pPref;
-        if (cand > bestBound) bestBound = cand;
+        if (cand > bestBound) {
+          bestBound = cand;
+          kBest = k;
+        }
       }
     }
 
     if (bestBound > estI) {
+      // LCG explain: tasks in the best Ω prefix (byLct[0..kBest] \ {taskI}).
+      const bestOmega = kBest >= 0
+        ? byLct.slice(0, kBest + 1).filter((_, k) => k !== i)
+        : [];
+      const explainEdge = (allocBoundLit && bestOmega.length > 0)
+        ? (): number[] | null => {
+          const lits: number[] = [];
+          for (const t of bestOmega) {
+            const tSv = getSimpleVar(t.iv.start);
+            const tEv = getSimpleVar(t.iv.end);
+            if (!tSv || !tEv) return null;
+            // Antecedents: earliest-start and latest-completion of each Ω task.
+            lits.push(-(allocBoundLit(tSv.index, t.startMin, 'geq') + 1));
+            lits.push(-(allocBoundLit(tEv.index, t.endMax, 'leq') + 1));
+          }
+          return lits;
+        } : undefined;
       try {
-        if (tightenStartMin(taskI, bestBound, domains, propagateLinear)) {
+        if (tightenStartMin(taskI, bestBound, domains, propagateLinear, explainEdge)) {
           changed = true;
         }
       } catch {
@@ -744,7 +846,8 @@ export function propagateNoOverlapEdgeFinding(
 export function propagateCumulativeEdgeFinding(
   ct: CumulativeConstraint,
   domains: Map<number, Domain>,
-  propagateLinear: LinearPropagateFn
+  propagateLinear: LinearPropagateFn,
+  allocBoundLit?: AllocBoundLitFn | null
 ): PropagationResult {
   // Extract capacity bounds
   const capBounds = getExprBounds(ct.capacity, domains);
@@ -804,8 +907,29 @@ export function propagateCumulativeEdgeFinding(
       const newStartMin = windowMax - neededSize;
 
       if (newStartMin > task.bounds.startMin && newStartMin < windowMax) {
+        // LCG explain: other tasks' mandatory parts that fill the window.
+        const capturedActiveTasks = activeTasks;
+        const capturedTask = task;
+        const capturedWindowMin = windowMin;
+        const capturedWindowMax = windowMax;
+        const explainCumEdge = allocBoundLit
+          ? (): number[] | null => {
+            const lits: number[] = [];
+            for (const other of capturedActiveTasks) {
+              if (other === capturedTask) continue;
+              const oMandStart = Math.max(other.bounds.startMax, capturedWindowMin);
+              const oMandEnd = Math.min(other.bounds.endMin, capturedWindowMax);
+              if (oMandStart >= oMandEnd) continue;
+              const oSv = getSimpleVar(other.bounds.iv.start);
+              const oEv = getSimpleVar(other.bounds.iv.end);
+              if (!oSv || !oEv) return null;
+              lits.push(-(allocBoundLit(oSv.index, other.bounds.startMax, 'leq') + 1));
+              lits.push(-(allocBoundLit(oEv.index, other.bounds.endMin, 'geq') + 1));
+            }
+            return lits;
+          } : undefined;
         try {
-          if (tightenStartMin(task.bounds, newStartMin, domains, propagateLinear)) {
+          if (tightenStartMin(task.bounds, newStartMin, domains, propagateLinear, explainCumEdge)) {
             changed = true;
           }
         } catch {
