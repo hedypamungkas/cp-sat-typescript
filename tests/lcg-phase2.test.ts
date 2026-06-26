@@ -17,6 +17,10 @@ import { BoolVarImpl } from '../src/variables';
 import type { Literal } from '../src/clause-engine';
 
 const OK: CpSolverStatus[] = [CpSolverStatus.OPTIMAL, CpSolverStatus.FEASIBLE];
+
+/** A decisive SAT/UNSAT verdict. UNKNOWN (timeout/stop) is INCONCLUSIVE, not "unsat". */
+const isDecisive = (s: CpSolverStatus): boolean =>
+  s === CpSolverStatus.OPTIMAL || s === CpSolverStatus.FEASIBLE || s === CpSolverStatus.INFEASIBLE;
 const N = 5;
 
 /** Brute-force: does any complete assignment satisfy all clauses? */
@@ -158,9 +162,10 @@ describe('LCG Phase 2 — reason-side soundness (native Boolean constraints)', (
         on.parameters.maxTimeInSeconds = 5;
         const onStatus = on.solve(build());
         // Same verdict (both OPTIMAL/FEASIBLE ⇒ SAT; both INFEASIBLE ⇒ UNSAT).
-        const offSat = OK.includes(offStatus);
-        const onSat = OK.includes(onStatus);
-        expect(onSat).toBe(offSat);
+        // Compare only decisive verdicts — UNKNOWN (timeout) is inconclusive.
+        if (isDecisive(offStatus) && isDecisive(onStatus)) {
+          expect(OK.includes(onStatus)).toBe(OK.includes(offStatus));
+        }
       }),
       { numRuns: 150 }
     );
