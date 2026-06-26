@@ -531,6 +531,21 @@ export class SolverEngine {
         domains.set(varIndex, domain.fixValue(value));
       }
     }
+    // Back-propagate through derived relations: if a hinted var is derived
+    // (var = coeff * base + offset), narrow the base variable too so that
+    // endVars created by interval constructors get pinned by sessionPeriod hints.
+    if (this._derivedVars) {
+      for (const [varIndex, derived] of this._derivedVars) {
+        const hintValue = this._model.hints.get(varIndex);
+        if (hintValue === undefined || derived.coeff === 0) continue;
+        const rawBase = (hintValue - derived.offset) / derived.coeff;
+        if (!Number.isInteger(rawBase)) continue;
+        const baseDomain = domains.get(derived.baseVarIndex);
+        if (baseDomain && baseDomain.contains(rawBase)) {
+          domains.set(derived.baseVarIndex, baseDomain.fixValue(rawBase));
+        }
+      }
+    }
   }
 
   /**
@@ -1608,6 +1623,11 @@ export class SolverEngine {
     const intervals: { start: number; end: number }[] = [];
 
     for (const iv of ct.intervals) {
+      // Skip absent optional intervals
+      if (iv.isPresent) {
+        const presDomain = domains.get(iv.isPresent.index);
+        if (presDomain && presDomain.max === 0) continue;
+      }
       // Try to evaluate start and end
       const startVal = this._evaluateExpression(iv.start, domains);
       const endVal = this._evaluateExpression(iv.end, domains);
@@ -1638,16 +1658,26 @@ export class SolverEngine {
 
     // For each pair of overlapping intervals, check demand sum
     for (let i = 0; i < ct.intervals.length; i++) {
-      const startI = this._evaluateExpression(ct.intervals[i].start, domains);
-      const endI = this._evaluateExpression(ct.intervals[i].end, domains);
+      const ivI = ct.intervals[i];
+      if (ivI.isPresent) {
+        const pd = domains.get(ivI.isPresent.index);
+        if (pd && pd.max === 0) continue;
+      }
+      const startI = this._evaluateExpression(ivI.start, domains);
+      const endI = this._evaluateExpression(ivI.end, domains);
       const demandI = this._evaluateExpression(ct.demands[i], domains);
       if (startI === null || endI === null || demandI === null) return false;
 
       let totalDemand = demandI;
       for (let j = 0; j < ct.intervals.length; j++) {
         if (i === j) continue;
-        const startJ = this._evaluateExpression(ct.intervals[j].start, domains);
-        const endJ = this._evaluateExpression(ct.intervals[j].end, domains);
+        const ivJ = ct.intervals[j];
+        if (ivJ.isPresent) {
+          const pd = domains.get(ivJ.isPresent.index);
+          if (pd && pd.max === 0) continue;
+        }
+        const startJ = this._evaluateExpression(ivJ.start, domains);
+        const endJ = this._evaluateExpression(ivJ.end, domains);
         const demandJ = this._evaluateExpression(ct.demands[j], domains);
         if (startJ === null || endJ === null || demandJ === null) return false;
 
@@ -2419,6 +2449,7 @@ export class SolverEngine {
     for (const expr of ct.expressions) {
       const isSimple = expr.vars.length === 1 && expr.coeffs[0] === 1 && expr.offset === 0;
       const exprDomain = this._getExpressionDomain(expr, domains);
+      if (exprDomain.isEmpty) return 'INFEASIBLE';
 
       exprDomains.push({
         expr,
@@ -3452,7 +3483,8 @@ export class SolverEngine {
     for (let i = 0; i < expr.vars.length; i++) {
       const v = expr.vars[i];
       const c = expr.coeffs[i];
-      const d = domains.get(v.index)!;
+      const d = domains.get(v.index);
+      if (!d || d.isEmpty) return new Domain([]); // variable domain empty → expression empty
 
       if (c > 0) {
         min += c * d.min;

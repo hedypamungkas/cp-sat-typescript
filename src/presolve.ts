@@ -564,7 +564,8 @@ function propagateMinEquality(
 export function detectAffineRelations(
   model: CpModel,
   domains: Map<number, Domain>,
-  activeConstraints: Set<number>
+  activeConstraints: Set<number>,
+  alreadyDerived: Map<number, DerivedVar> = new Map()
 ): { derivedVars: Map<number, DerivedVar>; domains: Map<number, Domain>; numConstraintsRemoved: number } {
   const derivedVars = new Map<number, DerivedVar>();
   let numConstraintsRemoved = 0;
@@ -586,7 +587,7 @@ export function detectAffineRelations(
       const c = coeffs[0];
       const xIdx = vars[0].index;
 
-      if (derivedVars.has(xIdx)) continue;
+      if (derivedVars.has(xIdx) || alreadyDerived.has(xIdx)) continue;
 
       if (rhs % c !== 0) continue; // Not an integer solution
 
@@ -610,8 +611,9 @@ export function detectAffineRelations(
       const xIdx = vars[0].index;
       const yIdx = vars[1].index;
 
-      // Skip if either is already derived
-      if (derivedVars.has(xIdx) || derivedVars.has(yIdx)) continue;
+      // Skip if either is already derived (in this pass or a prior presolve iteration)
+      if (derivedVars.has(xIdx) || derivedVars.has(yIdx) ||
+          alreadyDerived.has(xIdx) || alreadyDerived.has(yIdx)) continue;
 
       // Try to express x in terms of y: x = (rhs - c2*y) / c1
       if (c1 !== 0 && (rhs % gcd(Math.abs(c1), Math.abs(c2)) !== 0)) continue;
@@ -870,12 +872,16 @@ export function presolveModel(
     }
 
     // Phase 2: Affine relation detection
-    const affineResult = detectAffineRelations(model, domains, activeConstraints);
+    // Pass the accumulated derivedVars so it won't re-derive variables already
+    // derived in a prior iteration (which would orphan their former base variable).
+    const affineResult = detectAffineRelations(model, domains, activeConstraints, derivedVars);
     totalConstraintsRemoved += affineResult.numConstraintsRemoved;
 
-    // Merge derived vars
+    // Merge derived vars (only new ones — alreadyDerived guard prevents overwrite)
     for (const [varIdx, derived] of affineResult.derivedVars) {
-      derivedVars.set(varIdx, derived);
+      if (!derivedVars.has(varIdx)) {
+        derivedVars.set(varIdx, derived);
+      }
     }
 
     // If nothing changed in this iteration, we're done

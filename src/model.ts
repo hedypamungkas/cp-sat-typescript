@@ -1141,7 +1141,7 @@ export class CpModel {
    * @param var_ - Variable
    * @param value - Hint value
    */
-  addHint(var_: IntVarImpl, value: number): void {
+  addHint(var_: IntVarImpl | BoolVarImpl, value: number): void {
     this._hints.set(var_.index, value);
   }
 

@@ -289,7 +289,7 @@ describe('NoOverlap Propagation', () => {
       const s2 = model.newIntVar(0, 10, 's2');
       const present = model.newBoolVar('present');
       const iv1 = model.newFixedSizeIntervalVar(s1, 5, 't1');
-      const iv2 = model.newOptionalIntervalVar(s2, 5, present, 't2');
+      const iv2 = model.newOptionalFixedSizeIntervalVar(s2, 5, present, 't2');
       model.add(present.le(0));
       model.addNoOverlap([iv1, iv2]);
 
@@ -304,7 +304,7 @@ describe('NoOverlap Propagation', () => {
       const s2 = model.newIntVar(0, 10, 's2');
       const present = model.newBoolVar('present');
       const iv1 = model.newFixedSizeIntervalVar(s1, 3, 't1');
-      const iv2 = model.newOptionalIntervalVar(s2, 3, present, 't2');
+      const iv2 = model.newOptionalFixedSizeIntervalVar(s2, 3, present, 't2');
       model.addBoolAnd([present]);
       model.addNoOverlap([iv1, iv2]);
 
@@ -323,7 +323,7 @@ describe('NoOverlap Propagation', () => {
       const s2 = model.newIntVar(0, 10, 's2');
       const present = model.newBoolVar('present');
       const iv1 = model.newFixedSizeIntervalVar(s1, 5, 't1');
-      const iv2 = model.newOptionalIntervalVar(s2, 5, present, 't2');
+      const iv2 = model.newOptionalFixedSizeIntervalVar(s2, 5, present, 't2');
       model.addNoOverlap([iv1, iv2]);
 
       const { status } = solveAndCheck(model);
@@ -518,7 +518,7 @@ describe('Cumulative Propagation', () => {
       const s2 = model.newIntVar(0, 10, 's2');
       const present = model.newBoolVar('present');
       const iv1 = model.newFixedSizeIntervalVar(s1, 3, 't1');
-      const iv2 = model.newOptionalIntervalVar(s2, 3, present, 't2');
+      const iv2 = model.newOptionalFixedSizeIntervalVar(s2, 3, present, 't2');
       model.add(present.le(0));
       model.addCumulative([iv1, iv2], [3, 3], 3);
 
@@ -532,7 +532,7 @@ describe('Cumulative Propagation', () => {
       const s2 = model.newIntVar(0, 10, 's2');
       const present = model.newBoolVar('present');
       const iv1 = model.newFixedSizeIntervalVar(s1, 3, 't1');
-      const iv2 = model.newOptionalIntervalVar(s2, 3, present, 't2');
+      const iv2 = model.newOptionalFixedSizeIntervalVar(s2, 3, present, 't2');
       model.addBoolAnd([present]);
       model.addCumulative([iv1, iv2], [2, 2], 3);
 

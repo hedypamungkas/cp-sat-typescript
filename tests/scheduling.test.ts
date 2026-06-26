@@ -193,7 +193,7 @@ describe('Scheduling Constraints - edge cases', () => {
 
       // s2 is optional — when present=false, interval is ignored
       const iv1 = model.newFixedSizeIntervalVar(s1, 5, 't1');
-      const iv2 = model.newOptionalIntervalVar(s2, 5, present, 't2');
+      const iv2 = model.newOptionalFixedSizeIntervalVar(s2, 5, present, 't2');
 
       // Force present = false
       model.add(present.le(0));
@@ -217,7 +217,7 @@ describe('Scheduling Constraints - edge cases', () => {
       const present = model.newBoolVar('present');
 
       const iv1 = model.newFixedSizeIntervalVar(s1, 3, 't1');
-      const iv2 = model.newOptionalIntervalVar(s2, 3, present, 't2');
+      const iv2 = model.newOptionalFixedSizeIntervalVar(s2, 3, present, 't2');
 
       // Force present = true
       model.addBoolAnd([present]);

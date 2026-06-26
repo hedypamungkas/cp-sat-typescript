@@ -44,7 +44,7 @@
  * Run:  npx tsx examples/campus-timetabling.ts
  */
 
-import { CpModel, CpSolver, CpSolverStatus, LinearExpr, BoolVarImpl, IntVarImpl } from '../src';
+import { CpModel, CpSolver, CpSolverStatus, LinearExpr, BoolVarImpl, IntVarImpl, SolverParameters } from '../src';
 
 // ---------------------------------------------------------------------------
 // Time grid
@@ -502,11 +502,52 @@ function printDiff(before: ScheduledSession[], after: ScheduledSession[]): void 
 }
 
 // ---------------------------------------------------------------------------
-// Main: initial solve, then re-schedule under a perturbation
+// Solver-config comparison helper
+// ---------------------------------------------------------------------------
+interface CfgEntry { name: string; params: SolverParameters; }
+
+const SOLVER_CONFIGS: CfgEntry[] = [
+  { name: 'baseline',    params: {} },
+  { name: 'lpBounds',    params: { enableLpBounds: true } },
+  { name: 'simplex',     params: { enableSimplexBounds: true } },
+  { name: 'lcg',         params: { enableLcg: true } },
+  { name: 'simplex+lcg', params: { enableSimplexBounds: true, enableLcg: true } },
+];
+
+function compareConfigs(label: string, buildOpts: BuildOptions = {}): void {
+  console.log(`\n=== Solver config comparison — ${label} ===`);
+  console.log(`${'config'.padEnd(14)} ${'status'.padEnd(10)} ${'wall(s)'.padStart(7)} ${'branches'.padStart(9)} ${'conflicts'.padStart(10)} ${'learned'.padStart(8)} ${'obj'.padStart(4)}`);
+  for (const { name, params } of SOLVER_CONFIGS) {
+    const solver = new CpSolver();
+    solver.parameters = { maxTimeInSeconds: 15, ...params };
+    const { model, assign } = buildModel(buildOpts);
+    const status = solver.solve(model);
+    const sessions = status === CpSolverStatus.OPTIMAL || status === CpSolverStatus.FEASIBLE
+      ? decode(solver, assign) : [];
+    const prefVio = sessions.filter(ses =>
+      LECTURERS[ses.lecturer].dislikedHours.includes(PERIODS[ses.period].hour)
+    ).length;
+    const objStr = sessions.length > 0 ? String(prefVio) : '-';
+    console.log(
+      `${name.padEnd(14)} ${CpSolverStatus[status].padEnd(10)}` +
+      ` ${solver.wallTime.toFixed(3).padStart(7)}` +
+      ` ${String(solver.numBranches).padStart(9)}` +
+      ` ${String(solver.numConflicts).padStart(10)}` +
+      ` ${String(solver.numLearnedClauses).padStart(8)}` +
+      ` ${objStr.padStart(4)}`
+    );
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Main: solver comparison, then initial solve + re-schedule under perturbation
 // ---------------------------------------------------------------------------
 function main(): void {
   console.log('Campus Course Timetabling (curriculum-based) — cp-sat-ts prototype\n');
   console.log(`${SECTIONS.length} sections, ${COURSES.length} courses, ${ROOMS.length} rooms, ${LECTURERS.length} lecturers, ${PERIODS.length} periods`);
+
+  // 0) Compare solver configurations on the baseline problem.
+  compareConfigs('initial problem (7 sections, no perturbation)');
 
   // 1) Initial schedule: minimise lecturer slot-preference violations.
   const solver1 = new CpSolver();

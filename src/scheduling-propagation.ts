@@ -538,7 +538,9 @@ export function propagateNoOverlapDetectable(
     tasks.push(bounds);
   }
 
-  const activeTasks = tasks.filter(t => t.presenceState !== 'absent');
+  // Only definitely-present tasks: a 'maybe' task may not execute, so packing
+  // it alongside others can incorrectly conclude infeasibility for optional intervals.
+  const activeTasks = tasks.filter(t => t.presenceState === 'present');
   if (activeTasks.length <= 1) return 'CONSISTENT';
 
   let changed = false;
@@ -635,7 +637,9 @@ export function propagateNoOverlapNotLast(
     tasks.push(bounds);
   }
 
-  const activeTasks = tasks.filter(t => t.presenceState !== 'absent');
+  // Only definitely-present tasks: a 'maybe' task may not execute, so including
+  // it in the Not-Last packing overestimates density and causes false INFEASIBLE.
+  const activeTasks = tasks.filter(t => t.presenceState === 'present');
   if (activeTasks.length <= 1) return 'CONSISTENT';
 
   let changed = false;
