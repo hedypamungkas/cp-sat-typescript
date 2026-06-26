@@ -441,6 +441,50 @@ function referenceKeys(sessions: ScheduledSession[]): Set<string> {
   return new Set(sessions.map(ses => tupleKey(ses.section, ses.lecturer, ses.room, ses.period)));
 }
 
+function printGrid(label: string, sessions: ScheduledSession[]): void {
+  console.log(`\n--- ${label} — Timetable Grid ---`);
+
+  const grid: ScheduledSession[][][] = HOURS.map(() =>
+    Array.from({ length: DAY_NAMES.length }, () => [])
+  );
+  for (const ses of sessions) {
+    const per = PERIODS[ses.period];
+    grid[HOURS.indexOf(per.hour)][per.day].push(ses);
+  }
+
+  const CW = 16;
+  const TW = 9;
+  const sep = ' '.repeat(TW) + ('+' + '-'.repeat(CW)).repeat(DAY_NAMES.length) + '+';
+  const cell = (s: string): string => ` ${s}`.padEnd(CW);
+  const empty = ' '.repeat(CW);
+
+  console.log(' '.repeat(TW) + DAY_NAMES.map(d => `| ${d.padEnd(CW - 1)}`).join('') + '|');
+  console.log(sep);
+
+  for (let hIdx = 0; hIdx < HOURS.length; hIdx++) {
+    const row = grid[hIdx];
+    const maxSes = Math.max(1, ...row.map(c => c.length));
+
+    for (let i = 0; i < maxSes; i++) {
+      let l1 = i === 0 ? fmtHour(HOURS[hIdx]).padEnd(TW) : ' '.repeat(TW);
+      let l2 = ' '.repeat(TW);
+      for (let d = 0; d < DAY_NAMES.length; d++) {
+        const ses = row[d][i];
+        if (ses) {
+          l1 += '|' + cell(SECTIONS[ses.section].id);
+          l2 += '|' + cell(`${ROOMS[ses.room].id} (${LECTURERS[ses.lecturer].id})`);
+        } else {
+          l1 += '|' + empty;
+          l2 += '|' + empty;
+        }
+      }
+      console.log(l1 + '|');
+      console.log(l2 + '|');
+    }
+    console.log(sep);
+  }
+}
+
 function printDiff(before: ScheduledSession[], after: ScheduledSession[]): void {
   const beforeKeys = referenceKeys(before);
   const afterKeys = referenceKeys(after);
@@ -473,6 +517,7 @@ function main(): void {
     ? decode(solver1, built1.assign)
     : [];
   printSchedule('INITIAL SCHEDULE', status1, sessions1, solver1);
+  if (sessions1.length > 0) printGrid('INITIAL SCHEDULE', sessions1);
 
   if (sessions1.length === 0) {
     console.log('\nInitial schedule infeasible — aborting re-schedule demo.');
@@ -507,6 +552,7 @@ function main(): void {
       ? decode(solver2b, built2.assign)
       : [];
     printSchedule(`RE-SCHEDULED (minimal disruption) — ${lockNote}`, status2, sessions2b, solver2b);
+    if (sessions2b.length > 0) printGrid('RE-SCHEDULED', sessions2b);
     printDiff(sessions1, sessions2b);
     return;
   }
@@ -515,6 +561,7 @@ function main(): void {
     ? decode(solver2, built2.assign)
     : [];
   printSchedule(`RE-SCHEDULED (minimal disruption) — ${lockNote}`, status2, sessions2, solver2);
+  if (sessions2.length > 0) printGrid('RE-SCHEDULED', sessions2);
   printDiff(sessions1, sessions2);
 }
 

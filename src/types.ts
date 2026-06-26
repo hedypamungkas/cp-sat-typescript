@@ -844,6 +844,17 @@ export interface SolverParameters {
    */
   enableLpBounds?: boolean;
   /**
+   * Enable LP-relaxation bounds via a FULL bounded-variable primal simplex.
+   * Generalizes `enableLpBounds`: it solves the continuous relaxation over ALL
+   * linear constraints (mixed signs, multiple rows) for BOTH maximize (upper
+   * bound) and minimize (lower bound) objectives, giving a much tighter bound
+   * than interval arithmetic. Non-linear constraints (AllDifferent, NoOverlap,
+   * Element, …) are ignored — sound but loose. Pure TypeScript, two-phase
+   * simplex with Bland's rule and an iteration cap; any numerical trouble falls
+   * back to the interval bound. Default: OFF.
+   */
+  enableSimplexBounds?: boolean;
+  /**
    * Enable LCG Phase 1: a Boolean clause database with 2-watched-literal unit
    * propagation, fed by `model.addClause(...)`. Provides efficient unit
    * propagation over explicit clauses. Pure TypeScript. Default: OFF.

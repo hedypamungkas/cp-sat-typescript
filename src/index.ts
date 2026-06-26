@@ -177,6 +177,21 @@ export type {
 } from './lp-bounds';
 
 // ============================================================================
+// LP Relaxation (full simplex)
+// ============================================================================
+
+export { solveBoundedSimplex } from './simplex';
+export type {
+  SimplexLpData,
+  ColumnBounds,
+  LpSense,
+  SimplexResult,
+  SimplexOptions,
+} from './simplex';
+export { buildLpProblem, extractColumnBounds } from './lp-problem';
+export type { LpProblem } from './lp-problem';
+
+// ============================================================================
 // LCG Clause Engine
 // ============================================================================
 

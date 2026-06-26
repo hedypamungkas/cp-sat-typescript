@@ -42,6 +42,9 @@ import type { SearchProgressCallback } from './callback';
 import { presolveModel, computeDerivedValue, DerivedVar } from './presolve';
 import { detectPackingConstraints, computeLpObjectiveBound, EMPTY_CLASSIFICATION } from './lp-bounds';
 import type { PackingClassification } from './lp-bounds';
+import { buildLpProblem, extractColumnBounds } from './lp-problem';
+import { solveBoundedSimplex } from './simplex';
+import type { LpProblem } from './lp-problem';
 import { ClauseDatabase, litVar, isLitSatisfied } from './clause-engine';
 import type { PropagationOutcome } from './clause-engine';
 import { AssignmentTrail } from './assignment-trail';
@@ -189,6 +192,10 @@ export class SolverEngine {
   // LP-relaxation bound state (detection is cached once per solve() by _runPresolve)
   private _lpBoundsEnabled: boolean = false;
   private _packingClassification: PackingClassification = EMPTY_CLASSIFICATION;
+  // Full simplex LP-relaxation bound state. The static LP problem is built once
+  // per solve() by _runPresolve; per node only the column bounds are re-read.
+  private _simplexBoundsEnabled: boolean = false;
+  private _lpProblem: LpProblem | null = null;
 
   // LCG clause engine state (Phase 1: clause DB + 2-watched-literal unit propagation)
   private _lcgEnabled: boolean = false;
@@ -250,6 +257,7 @@ export class SolverEngine {
     this._lnsNeighborhoodSize = parameters.lnsNeighborhoodSize ?? 0.5;
     this._lpBoundsEnabled = parameters.enableLpBounds ?? false;
     this._lcgEnabled = parameters.enableLcg ?? false;
+    this._simplexBoundsEnabled = parameters.enableSimplexBounds ?? false;
     this._stats = {
       numConflicts: 0,
       numBranches: 0,
@@ -298,6 +306,7 @@ export class SolverEngine {
     this._searchExhausted = true;
     this._restartCount = 0;
     this._packingClassification = EMPTY_CLASSIFICATION;
+    this._lpProblem = null;
     this._assignTrail.reset();
     this._lastConflictLiterals = null;
     this._rootUnsat = false;
@@ -495,6 +504,19 @@ export class SolverEngine {
       this._packingClassification = EMPTY_CLASSIFICATION;
     }
 
+    // Build the full simplex LP problem once per solve (the model is immutable;
+    // only column bounds change per node). Only linear constraints feed the LP.
+    if (this._simplexBoundsEnabled && this._objectiveExpr) {
+      this._lpProblem = buildLpProblem(
+        this._model.constraints,
+        i => this._activeConstraints !== null && this._activeConstraints.has(i),
+        this._objectiveExpr,
+        this._isMaximize
+      );
+    } else {
+      this._lpProblem = null;
+    }
+
     // presolveModel mutates `domains` in place and returns the same object.
     return { status: result.status, domains };
   }
@@ -567,15 +589,15 @@ export class SolverEngine {
    * Compute the objective bound (min or max possible) from current domains.
    *
    * When `strong` is true (used at the post-propagation prune site and in
-   * throttled progress logging) and LP bounds are enabled for a maximize
-   * objective, tighten the upper bound via the fractional-knapsack LP
-   * relaxation. The cheap interval-arithmetic bound is always computed first,
-   * so the result is never looser than today's behavior.
+   * throttled progress logging), two optional LP relaxations may tighten the
+   * bound: the cheap fractional-knapsack bound (`enableLpBounds`, maximize
+   * only) and the full bounded-variable simplex bound (`enableSimplexBounds`,
+   * both senses, all linear constraints). The cheap interval-arithmetic bound is
+   * always computed first, so the result is never looser than today's behavior.
    *
    * `strong` is only passed at the post-propagation site on purpose: the LP
-   * bound is O(n log n) per packing constraint, while the interval bound is
-   * O(objective terms). Running the strong bound pre-propagation would slow
-   * every node for little gain, since domains there are looser.
+   * bounds are far costlier than the O(objective terms) interval bound, and
+   * domains are tightest there, giving the bounds the best chance to bite.
    */
   private _computeObjectiveBound(
     domains: Map<number, Domain>,
@@ -583,7 +605,7 @@ export class SolverEngine {
   ): { min: number; max: number } | null {
     if (!this._objectiveExpr) return null;
     const exprDomain = this._getExpressionDomain(this._objectiveExpr, domains);
-    const min = exprDomain.min;
+    let min = exprDomain.min;
     let max = exprDomain.max;
     if (strong && this._lpBoundsEnabled && this._isMaximize) {
       const lp = computeLpObjectiveBound({
@@ -594,6 +616,26 @@ export class SolverEngine {
       });
       if (lp !== null && lp < max) {
         max = lp; // tighten the upper bound only (never unsound: lp ≥ true optimum)
+      }
+    }
+    // Full simplex LP relaxation: generalizes the knapsack bound to ALL linear
+    // constraints and BOTH objective senses. For maximize it tightens `max` (an
+    // upper bound); for minimize it tightens `min` (a lower bound). Any LP
+    // trouble (infeasible/unbounded/cap/NaN) is treated as "no tightening" — the
+    // interval bound already computed above is the floor, so this can never
+    // loosen the result or prune the optimum.
+    if (strong && this._simplexBoundsEnabled && this._lpProblem) {
+      const cb = extractColumnBounds(this._lpProblem, domains);
+      if (cb !== null) {
+        const sense = this._isMaximize ? 'maximize' : 'minimize';
+        const r = solveBoundedSimplex(this._lpProblem.data, cb, sense);
+        if (r.status === 'optimal') {
+          if (this._isMaximize) {
+            if (r.value < max) max = r.value; // lp ≥ true optimum
+          } else {
+            if (r.value > min) min = r.value; // lp ≤ true optimum
+          }
+        }
       }
     }
     return { min, max };
@@ -771,6 +813,16 @@ export class SolverEngine {
 
           if (this._rootUnsat) return CpSolverStatus.INFEASIBLE;
 
+          // A child hit the time limit or was stopped: propagate that up
+          // immediately (further values would only re-hit the limit). If a
+          // solution was already found — by this branch or a sibling — report
+          // FEASIBLE, otherwise UNKNOWN. Crucially, never INFEASIBLE: that would
+          // misreport an interrupted search as "no solution exists".
+          if (status === CpSolverStatus.UNKNOWN) {
+            this._searchExhausted = false;
+            return this._solution ? CpSolverStatus.FEASIBLE : CpSolverStatus.UNKNOWN;
+          }
+
           if (status === CpSolverStatus.OPTIMAL) {
             if (!this._enumerateAll && !this._hasObjective) {
               return CpSolverStatus.OPTIMAL;
@@ -784,9 +836,17 @@ export class SolverEngine {
         }
       }
 
-      // If we found any solution, return FEASIBLE (for optimization) or INFEASIBLE
+      // If we found any solution, return FEASIBLE (for optimization). Otherwise
+      // return INFEASIBLE only if this node's values were genuinely exhausted;
+      // if the search was interrupted (external stop / time limit) without a
+      // solution, return UNKNOWN — reporting INFEASIBLE here would be a false
+      // "no solution exists" when really the search was just cut short.
       if (this._solution) {
         return CpSolverStatus.FEASIBLE;
+      }
+      if (this._stopped || this._checkTimeLimit()) {
+        this._searchExhausted = false;
+        return CpSolverStatus.UNKNOWN;
       }
 
       return CpSolverStatus.INFEASIBLE;
