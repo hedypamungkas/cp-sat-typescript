@@ -16,6 +16,7 @@ import {
   ClauseDatabase,
   normalizeClause,
   litVar,
+  litValue,
   isLitSatisfied,
   isLitFalsified,
 } from '../src/clause-engine';
@@ -205,7 +206,7 @@ describe('ClauseDatabase — exact unit propagation', () => {
 // ============================================================================
 
 describe('ClauseDatabase — soundness & completeness (property based)', () => {
-  it('never assigns an unforced literal, and detects UNSAT exactly (soundness)', () => {
+  it('never over-forces a literal, and reaches a sound unit-propagation fixpoint', () => {
     fc.assert(
       fc.property(instanceArb, ({ clauses, seedMask, seedVals }) => {
         // Normalize/drop tautologies so the engine and oracle agree.
@@ -250,20 +251,56 @@ describe('ClauseDatabase — soundness & completeness (property based)', () => {
         const propR = db.propagate(domains, noopReasonTrail, new Set(seed.keys()), allBool);
         const engineInfeasible = setupR === 'INFEASIBLE' || propR === 'INFEASIBLE';
 
-        if (all.length === 0) {
-          // UNSAT under the seed: the engine must detect it.
-          expect(engineInfeasible).toBe(true);
-          return;
+        // SOUNDNESS of INFEASIBLE: a satisfiable instance must never be reported
+        // as a conflict...
+        if (all.length > 0) {
+          expect(engineInfeasible).toBe(false);
+          // ...and every literal the engine fixed must hold in ALL satisfying
+          // completions (it never over-forces).
+          for (let v = 0; v < N; v++) {
+            const d = domains.get(v)!;
+            if (d.size === 1) {
+              const forcedVal = d.min;
+              for (const mask of all) {
+                expect((mask >> v) & 1).toBe(forcedVal);
+              }
+            }
+          }
         }
-        // Feasible: the engine must NOT report INFEASIBLE...
-        expect(engineInfeasible).toBe(false);
-        // ...and every literal it fixed must be true in ALL satisfying completions.
-        for (let v = 0; v < N; v++) {
-          const d = domains.get(v)!;
-          if (d.size === 1) {
-            const forcedVal = d.min;
-            for (const mask of all) {
-              expect((mask >> v) & 1).toBe(forcedVal);
+
+        // COMPLETENESS of UNIT PROPAGATION — NOT of satisfiability. Unit
+        // propagation is sound but INCOMPLETE: it cannot detect UNSAT that
+        // requires resolution / clause learning (e.g. (¬x3∨x4) ∧ (¬x3∨¬x4)
+        // entails ¬x3, but neither binary clause is unit until x4 is assigned).
+        // So we do NOT assert the engine detects every UNSAT instance. We assert
+        // it reached a genuine propagation fixpoint: when no conflict was found,
+        // every clause is satisfied, has ≥2 non-falsified literals, or (if unit)
+        // has its literal already forced. A fully-falsified clause without
+        // INFEASIBLE, or a unit-and-unforced clause, would be a real bug.
+        if (!engineInfeasible) {
+          for (const clause of norm) {
+            let satisfied = false;
+            let nonFalsified = 0;
+            let unitLit: Literal | null = null;
+            for (const l of clause) {
+              if (isLitSatisfied(l, domains)) {
+                satisfied = true;
+                break;
+              }
+              if (!isLitFalsified(l, domains)) {
+                nonFalsified++;
+                unitLit = l;
+              }
+            }
+            if (satisfied) continue;
+            if (nonFalsified === 0) {
+              // Fully falsified at a "clean" fixpoint → a missed conflict.
+              expect(engineInfeasible).toBe(true);
+            } else if (nonFalsified === 1) {
+              // Unit at fixpoint → its single literal must already be forced.
+              const d = domains.get(litVar(unitLit!))!;
+              expect(d.size === 1).toBe(true);
+              expect(d.min).toBe(litValue(unitLit!));
             }
           }
         }
