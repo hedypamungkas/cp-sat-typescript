@@ -1,0 +1,181 @@
+id,name,sessions_per_week,duration,sks,students,facilities,package,home_building
+TI1,Algorithms & Data Structures,2,2,4,35,,TI-A,Building-A
+TI2,Computer Networks,2,1,2,35,,TI-B,Building-A
+TI3,Object-Oriented Programming,2,2,4,30,computer,TI-C,Building-A
+TI4,Artificial Intelligence,2,1,2,35,,TI-D,Building-A
+TI5,Software Engineering,2,1,2,35,,TI-E,Building-A
+TI6,Cybersecurity,2,1,2,35,,TI-F,Building-A
+TI7,Databases,2,2,4,30,computer,TI-A,Building-A
+TI8,Distributed Systems,1,2,2,30,computer,TI-B,Building-A
+TI9,Computer Graphics,2,1,2,35,,TI-C,Building-A
+TI10,Mobile Programming,2,2,4,35,,TI-D,Building-A
+TI11,Algorithms & Data Structures Advanced,2,3,6,30,computer,TI-E,Building-A
+TI12,Computer Networks Advanced,2,2,4,35,,TI-F,Building-A
+SI1,Systems Analysis & Design,2,1,2,35,,SI-A,Building-A
+SI2,IT Project Management,2,1,2,35,,SI-B,Building-A
+SI3,Enterprise Resource Planning,1,2,2,35,,SI-C,Building-A
+SI4,Business Intelligence,2,1,2,35,,SI-D,Building-A
+SI5,IT Governance,2,1,2,35,,SI-E,Building-A
+SI6,Information Systems Audit,2,2,4,30,computer,SI-F,Building-A
+SI7,Human-Computer Interaction,2,1,2,28,computer;lab_software,SI-A,Building-A
+SI8,Decision Support Systems,1,2,2,35,,SI-B,Building-A
+SI9,E-Government,2,3,6,30,computer,SI-C,Building-A
+SI10,Data Warehouse,2,3,6,30,computer,SI-D,Building-A
+SI11,Systems Analysis & Design Advanced,2,3,6,30,computer,SI-E,Building-A
+SI12,IT Project Management Advanced,1,2,2,35,,SI-F,Building-A
+TK1,Computer Architecture,1,2,2,35,,TK-A,Building-A
+TK2,Operating Systems,2,1,2,35,,TK-B,Building-A
+TK3,Embedded Systems,1,1,1,35,,TK-C,Building-A
+TK4,Wireless Networks,2,1,2,35,,TK-D,Building-A
+TK5,Internet of Things,2,1,2,35,,TK-E,Building-A
+TK6,Intro to Robotics,2,2,4,35,,TK-F,Building-A
+TK7,Microcontrollers,1,1,1,28,computer;lab_software,TK-A,Building-A
+TK8,Digital Signal Processing,2,2,4,35,,TK-B,Building-A
+TK9,Cloud Computing,2,2,4,35,,TK-C,Building-A
+TK10,Network Security,2,1,2,35,,TK-D,Building-A
+TK11,Computer Architecture Advanced,1,1,1,35,,TK-E,Building-A
+TK12,Operating Systems Advanced,2,1,2,35,,TK-F,Building-A
+DS1,Intro to Data Science,2,1,2,35,,DS-A,Building-C
+DS2,Inferential Statistics,2,2,4,30,computer,DS-B,Building-C
+DS3,Intro to Machine Learning,1,3,3,30,computer,DS-C,Building-C
+DS4,Data Visualization,2,3,6,30,computer,DS-D,Building-C
+DS5,Data Programming in Python,2,1,2,35,,DS-E,Building-C
+DS6,Data Mining,2,2,4,35,,DS-F,Building-C
+DS7,Deep Learning,2,3,6,30,computer,DS-A,Building-C
+DS8,Big Data Analytics,1,1,1,35,,DS-B,Building-C
+DS9,Intro to NLP,1,1,1,35,,DS-C,Building-C
+DS10,Exploratory Data Analysis,2,1,2,35,,DS-D,Building-C
+DS11,Intro to Data Science Advanced,2,2,4,30,computer,DS-E,Building-C
+DS12,Inferential Statistics Advanced,1,2,2,35,,DS-F,Building-C
+STAT1,Introductory Statistics,2,2,4,35,,STAT-A,Building-C
+STAT2,Probability & Bayes,2,2,4,35,,STAT-B,Building-C
+STAT3,Computational Statistics,2,2,4,35,,STAT-C,Building-C
+STAT4,Regression Analysis,1,3,3,30,computer,STAT-D,Building-C
+STAT5,Design of Experiments,1,2,2,35,,STAT-E,Building-C
+STAT6,Nonparametric Statistics,1,1,1,35,,STAT-F,Building-C
+STAT7,Time Series Analysis,2,2,4,35,,STAT-A,Building-C
+STAT8,Survey Sampling,1,2,2,35,,STAT-B,Building-C
+STAT9,Spatial Statistics,2,2,4,35,,STAT-C,Building-C
+STAT10,Numerical Methods for Statistics,2,1,2,28,computer;lab_software,STAT-D,Building-C
+STAT11,Introductory Statistics Advanced,2,2,4,30,computer,STAT-E,Building-C
+STAT12,Probability & Bayes Advanced,2,2,4,30,computer,STAT-F,Building-C
+MAT1,Numerical Algorithms,2,1,2,35,,MAT-A,Building-C
+MAT2,Discrete Mathematics,2,1,2,35,,MAT-B,Building-C
+MAT3,Calculus & Vectors,2,2,4,35,,MAT-C,Building-C
+MAT4,Linear Algebra,2,1,2,35,,MAT-D,Building-C
+MAT5,Differential Equations,2,1,2,35,,MAT-E,Building-C
+MAT6,Graph Theory,2,1,2,35,,MAT-F,Building-C
+MAT7,Mathematical Logic,1,2,2,35,,MAT-A,Building-C
+MAT8,Financial Mathematics,2,1,2,35,,MAT-B,Building-C
+MAT9,Real Analysis,2,2,4,35,,MAT-C,Building-C
+MAT10,Optimization,1,1,1,35,,MAT-D,Building-C
+MAT11,Numerical Algorithms Advanced,1,2,2,35,,MAT-E,Building-C
+MAT12,Discrete Mathematics Advanced,2,1,2,35,,MAT-F,Building-C
+MI1,IT Accounting Systems,2,1,2,35,,MI-A,Building-D
+MI2,IT HR Management,2,1,2,35,,MI-B,Building-D
+MI3,Business Analytics,2,1,2,35,,MI-C,Building-D
+MI4,IT Organizational Communication,2,2,4,35,,MI-D,Building-D
+MI5,Resource Planning,2,2,4,30,computer,MI-E,Building-D
+MI6,IT Risk Management,2,2,4,35,,MI-F,Building-D
+MI7,Management Information Systems,2,1,2,35,,MI-A,Building-D
+MI8,Digital Business Processes,2,1,2,35,,MI-B,Building-D
+MI9,Data Governance,2,2,4,35,,MI-C,Building-D
+MI10,Digital Business Innovation,2,2,4,30,computer,MI-D,Building-D
+MI11,IT Accounting Systems Advanced,2,2,4,35,,MI-E,Building-D
+MI12,IT HR Management Advanced,2,1,2,28,computer;lab_software,MI-F,Building-D
+EB1,Digital Communication,2,2,4,35,,EB-A,Building-D
+EB2,UX Design & Research,2,1,2,35,,EB-B,Building-D
+EB3,E-Commerce Systems,2,1,2,35,,EB-C,Building-D
+EB4,Digital Marketing,1,2,2,35,,EB-D,Building-D
+EB5,Digital Business,2,1,2,35,,EB-E,Building-D
+EB6,Supply Chain Management,2,1,2,35,,EB-F,Building-D
+EB7,Intro to Fintech,2,1,2,35,smartboard,EB-A,Building-D
+EB8,Digital Market Analysis,1,2,2,35,,EB-B,Building-D
+EB9,E-Business Strategy,2,1,2,35,,EB-C,Building-D
+EB10,Digital Business Law,1,2,2,30,computer,EB-D,Building-D
+EB11,Digital Communication Advanced,1,1,1,35,smartboard,EB-E,Building-D
+EB12,UX Design & Research Advanced,2,3,6,30,computer,EB-F,Building-D
+KT1,Digital Media,2,2,4,35,,KT-A,Building-D
+KT2,Digital Content Production,2,2,4,35,,KT-B,Building-D
+KT3,Social Media Strategy,2,1,2,35,smartboard,KT-C,Building-D
+KT4,Digital Journalism,2,1,2,35,smartboard,KT-D,Building-D
+KT5,Digital Photography,2,1,2,35,,KT-E,Building-D
+KT6,Podcasting,1,2,2,35,,KT-F,Building-D
+KT7,Community Management,2,1,2,35,,KT-A,Building-D
+KT8,Visual Communication Design,1,1,1,35,,KT-B,Building-D
+KT9,Brand Storytelling,2,1,2,35,,KT-C,Building-D
+KT10,Digital Media Ethics,2,1,2,35,,KT-D,Building-D
+KT11,Digital Media Advanced,1,2,2,35,,KT-E,Building-D
+KT12,Digital Content Production Advanced,2,1,2,35,smartboard,KT-F,Building-D
+DKV1,Design Fundamentals,2,1,2,35,,DKV-A,Building-E
+DKV2,Digital Graphic Design,2,1,2,35,smartboard,DKV-B,Building-E
+DKV3,Brand & Identity Design,2,2,4,35,smartboard,DKV-C,Building-E
+DKV4,Digital Illustration,2,2,4,35,,DKV-D,Building-E
+DKV5,Typography,2,1,2,35,,DKV-E,Building-E
+DKV6,Packaging Design,2,2,4,30,computer,DKV-F,Building-E
+DKV7,Editorial Design,2,1,2,35,,DKV-A,Building-E
+DKV8,Design Photography,2,2,4,30,computer,DKV-B,Building-E
+DKV9,Motion Graphics,1,2,2,30,computer,DKV-C,Building-E
+DKV10,Information Design,2,1,2,35,smartboard,DKV-D,Building-E
+DKV11,Design Fundamentals Advanced,2,1,2,35,,DKV-E,Building-E
+DKV12,Digital Graphic Design Advanced,2,1,2,35,,DKV-F,Building-E
+AD1,Intro to Animation,2,2,4,35,,AD-A,Building-E
+AD2,3D Modeling & Rigging,2,1,2,35,smartboard,AD-B,Building-E
+AD3,Digital Visual Effects,2,1,2,35,,AD-C,Building-E
+AD4,Intro to Game Design,2,1,2,35,,AD-D,Building-E
+AD5,Character Animation,1,3,3,30,computer,AD-E,Building-E
+AD6,Storyboarding,1,2,2,35,,AD-F,Building-E
+AD7,Advanced Rigging,2,2,4,35,,AD-A,Building-E
+AD8,2D Animation,2,1,2,35,smartboard,AD-B,Building-E
+AD9,Compositing,1,1,1,35,,AD-C,Building-E
+AD10,Stop Motion Animation,2,1,2,35,,AD-D,Building-E
+AD11,Intro to Animation Advanced,2,3,6,30,computer,AD-E,Building-E
+AD12,3D Modeling & Rigging Advanced,2,1,2,35,,AD-F,Building-E
+MDA1,Digital Archive Management,2,2,4,35,,MDA-A,Building-E
+MDA2,Interactive Media Production,2,3,6,30,computer,MDA-B,Building-E
+MDA3,Interactive Web Design,2,2,4,30,computer,MDA-C,Building-E
+MDA4,Multimedia Animation,2,1,2,35,smartboard,MDA-D,Building-E
+MDA5,Digital Audio,2,1,2,35,,MDA-E,Building-E
+MDA6,Video Editing,2,3,6,30,computer,MDA-F,Building-E
+MDA7,Interactive Game Design,2,2,4,35,,MDA-A,Building-E
+MDA8,Intro to VR/AR,2,2,4,35,,MDA-B,Building-E
+MDA9,Multimedia Project Management,1,1,1,35,,MDA-C,Building-E
+MDA10,Digital Experience Design,2,2,4,35,,MDA-D,Building-E
+MDA11,Digital Archive Management Advanced,2,1,2,35,,MDA-E,Building-E
+MDA12,Interactive Media Production Advanced,2,2,4,30,computer,MDA-F,Building-E
+IK1,Health Information Systems,2,2,4,35,,IK-A,Building-F
+IK2,Health Data Management,2,2,4,35,,IK-B,Building-F
+IK3,Digital Health Communication,2,1,2,35,,IK-C,Building-F
+IK4,Health Data Analytics,1,2,2,35,,IK-D,Building-F
+IK5,Epidemiology & Informatics,2,2,4,35,,IK-E,Building-F
+IK6,Hospital Information Systems,2,1,2,35,,IK-F,Building-F
+IK7,Quality of Service Management,2,1,2,35,,IK-A,Building-F
+IK8,Telemedicine,2,1,2,35,,IK-B,Building-F
+IK9,Health Information Ethics,2,1,2,35,,IK-C,Building-F
+IK10,Health Data Security,2,3,6,30,computer,IK-D,Building-F
+IK11,Health Information Systems Advanced,2,2,4,28,computer;lab_software,IK-E,Building-F
+IK12,Health Data Management Advanced,1,1,1,28,computer;lab_software,IK-F,Building-F
+TB1,Biomedical Informatics,2,3,6,30,computer,TB-A,Building-F
+TB2,Biomedical Signal Processing,2,3,6,30,computer,TB-B,Building-F
+TB3,Digital Medical Technology,2,1,2,28,computer;lab_software,TB-C,Building-F
+TB4,Health Ethics & Law,2,1,2,35,,TB-D,Building-F
+TB5,Medical Instrumentation,1,3,3,30,computer,TB-E,Building-F
+TB6,Digital Medical Imaging,2,1,2,35,,TB-F,Building-F
+TB7,Biomaterials,2,1,2,35,,TB-A,Building-F
+TB8,Medical Embedded Systems,2,2,4,35,,TB-B,Building-F
+TB9,Medical Robotics,2,1,2,35,,TB-C,Building-F
+TB10,Clinical Signal Analysis,2,2,4,35,,TB-D,Building-F
+TB11,Biomedical Informatics Advanced,1,2,2,30,computer,TB-E,Building-F
+TB12,Biomedical Signal Processing Advanced,2,1,2,35,,TB-F,Building-F
+RM1,Electronic Medical Records,2,2,4,35,,RM-A,Building-F
+RM2,Clinical Coding (ICD),2,2,4,35,,RM-B,Building-F
+RM3,Medical Records Management,2,2,4,35,,RM-C,Building-F
+RM4,Epidemiology & Informatics,2,2,4,35,,RM-D,Building-F
+RM5,Disease Classification,1,1,1,35,,RM-E,Building-F
+RM6,Health Information Systems,2,2,4,30,computer,RM-F,Building-F
+RM7,Health Statistics,2,2,4,35,,RM-A,Building-F
+RM8,Medical Records Law & Ethics,2,1,2,35,,RM-B,Building-F
+RM9,Digital Health Insurance,2,2,4,35,,RM-C,Building-F
+RM10,Medical Records Quality Management,2,2,4,35,,RM-D,Building-F
+RM11,Electronic Medical Records Advanced,2,1,2,35,,RM-E,Building-F
+RM12,Clinical Coding (ICD) Advanced,2,2,4,30,computer,RM-F,Building-F

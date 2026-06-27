@@ -4,6 +4,9 @@ node_modules/
 # Build output
 dist/
 
+# Timetabling example output (generated jadwal CSV)
+output/
+
 # IDE
 .idea/
 .vscode/

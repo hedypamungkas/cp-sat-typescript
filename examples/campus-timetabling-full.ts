@@ -1,21 +1,21 @@
 /**
- * Campus Course Timetabling — Skala Penuh (FILKOM)
+ * Campus Course Timetabling — Full Scale (FILKOM)
  * =================================================
- * Skenario: Fakultas Ilmu Komputer — Semester Ganjil 2024/2025
- *   • 50 kelas (sections) dari 21 mata kuliah lintas 5 jurusan
- *   • 18 dosen (dengan preferensi jam lunak)
- *   • 14 ruangan (kelas biasa, ruang kuliah besar, lab komputer, ruang seminar)
- *   • 40 slot waktu (Senin–Jumat × 8 jam/hari)
+ * Scenario: Faculty of Computer Science — Fall Semester 2024/2025
+ *   • 50 sections of 21 courses across 5 departments
+ *   • 18 lecturers (with soft time-slot preferences)
+ *   • 14 rooms (regular classrooms, large lecture halls, computer labs, seminar rooms)
+ *   • 40 time slots (Monday–Friday × 8 hours/day)
  *
- * Pendekatan: interval-variable model + greedy hint → 0 branch, OPTIMAL instan
- *   Setiap sesi → sessionPeriod IntVar + optional NoOverlap (dosen/ruang)
- *   Greedy constructive mengisi semua slot terlebih dahulu,
- *   lalu CP solver memverifikasi dalam 0 branch.
+ * Approach: interval-variable model + greedy hint → 0 branches, instant OPTIMAL
+ *   Each session → sessionPeriod IntVar + optional NoOverlap (lecturer/room)
+ *   Greedy constructive fills all slots first,
+ *   then CP solver verifies in 0 branches.
  *
- * Demonstrasi:
- *   1. Jadwal awal (semua kelas terjadwal, 0 branch, OPTIMAL)
- *   2. Perturbasi: LAB-A rusak total
- *   3. Penjadwalan ulang minimal disruption (hanya kelas terdampak yang pindah)
+ * Demonstration:
+ *   1. Initial schedule (all sections scheduled, 0 branches, OPTIMAL)
+ *   2. Perturbation: LAB-A fully out of service
+ *   3. Minimal-disruption rescheduling (only affected sections move)
  *
  * Run: npx tsx examples/campus-timetabling-full.ts
  */
@@ -29,8 +29,8 @@ import {
 // 1. TIME GRID
 // ═══════════════════════════════════════════════════════════════════════════
 
-const DAY_NAMES = ['Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat'];
-const HOURS = [8, 9, 10, 11, 13, 14, 15, 16]; // 8 slot (istirahat 12:00)
+const DAY_NAMES = ['Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday'];
+const HOURS = [8, 9, 10, 11, 13, 14, 15, 16]; // 8 slots (12:00 break)
 const H_PER_DAY = HOURS.length;               // 8
 const DAYS = 5;
 const TOTAL_P = DAYS * H_PER_DAY;             // 40
@@ -45,7 +45,7 @@ const fmtPeriod = (p: number): string =>
   `${DAY_NAMES[PERIODS[p].day]} ${String(PERIODS[p].hour).padStart(2,'0')}:00`;
 
 // ═══════════════════════════════════════════════════════════════════════════
-// 2. DEFINISI DATA
+// 2. DATA DEFINITIONS
 // ═══════════════════════════════════════════════════════════════════════════
 
 interface RoomDef   { id: string; cap: number; fac: string[]; }
@@ -53,7 +53,7 @@ interface LectDef   { id: string; disliked: number[]; }
 interface CourseDef { id: string; name: string; spw: number; students: number; fac: string[]; pkg: string; }
 interface SectionDef{ id: string; courseIdx: number; lecturers: number[]; }
 
-// ── 14 Ruangan ──────────────────────────────────────────────────────────────
+// ── 14 Rooms ───────────────────────────────────────────────────────────────
 const ROOMS: RoomDef[] = [
   { id: 'R-101',  cap:  40, fac: []           }, //  0
   { id: 'R-102',  cap:  40, fac: []           }, //  1
@@ -64,7 +64,7 @@ const ROOMS: RoomDef[] = [
   { id: 'H-201',  cap:  80, fac: ['projector']}, //  6
   { id: 'H-202',  cap:  80, fac: ['projector']}, //  7
   { id: 'H-203',  cap: 100, fac: ['projector']}, //  8
-  { id: 'LAB-A',  cap:  30, fac: ['computer'] }, //  9  ← diblokir saat reschedule
+  { id: 'LAB-A',  cap:  30, fac: ['computer'] }, //  9  ← blocked during reschedule
   { id: 'LAB-B',  cap:  30, fac: ['computer'] }, // 10
   { id: 'LAB-C',  cap:  30, fac: ['computer'] }, // 11
   { id: 'LAB-D',  cap:  30, fac: ['computer'] }, // 12
@@ -72,62 +72,62 @@ const ROOMS: RoomDef[] = [
 ];
 const LAB_A_IDX = 9;
 
-// ── 18 Dosen ────────────────────────────────────────────────────────────────
+// ── 18 Lecturers ───────────────────────────────────────────────────────────
 const LECTURERS: LectDef[] = [
-  { id: 'Dr. Andi',        disliked: [15, 16] }, //  0
-  { id: 'Dr. Budi',        disliked: [8]      }, //  1
-  { id: 'Prof. Candra',    disliked: []        }, //  2
-  { id: 'Dr. Dewi',        disliked: [16]     }, //  3
-  { id: 'Dr. Eko',         disliked: [8]      }, //  4
-  { id: 'Prof. Farida',    disliked: []        }, //  5
-  { id: 'Dr. Gunawan',     disliked: [13, 14] }, //  6
-  { id: 'Dr. Hendra',      disliked: [16]     }, //  7
-  { id: 'Prof. Indah',     disliked: []        }, //  8
-  { id: 'Dr. Joko',        disliked: [8, 9]   }, //  9
-  { id: 'Dr. Kartika',     disliked: [15]     }, // 10
-  { id: 'Dr. Lestari',     disliked: [8]      }, // 11
-  { id: 'Prof. Malik',     disliked: []        }, // 12
-  { id: 'Dr. Nanda',       disliked: [16]     }, // 13
-  { id: 'Dr. Oktavia',     disliked: [8, 9]   }, // 14
-  { id: 'Prof. Prasetyo',  disliked: []        }, // 15
-  { id: 'Dr. Qori',        disliked: [15, 16] }, // 16
-  { id: 'Dr. Rizki',       disliked: [8]      }, // 17
+  { id: 'Dr. Adams',       disliked: [15, 16] }, //  0
+  { id: 'Dr. Bennett',     disliked: [8]      }, //  1
+  { id: 'Prof. Carter',    disliked: []        }, //  2
+  { id: 'Dr. Davis',       disliked: [16]     }, //  3
+  { id: 'Dr. Edwards',     disliked: [8]      }, //  4
+  { id: 'Prof. Foster',    disliked: []        }, //  5
+  { id: 'Dr. Griffin',     disliked: [13, 14] }, //  6
+  { id: 'Dr. Harris',      disliked: [16]     }, //  7
+  { id: 'Prof. Irving',    disliked: []        }, //  8
+  { id: 'Dr. Jenkins',     disliked: [8, 9]   }, //  9
+  { id: 'Dr. Kennedy',     disliked: [15]     }, // 10
+  { id: 'Dr. Lawson',      disliked: [8]      }, // 11
+  { id: 'Prof. Mitchell',  disliked: []        }, // 12
+  { id: 'Dr. Norton',      disliked: [16]     }, // 13
+  { id: 'Dr. Owens',       disliked: [8, 9]   }, // 14
+  { id: 'Prof. Pearson',   disliked: []        }, // 15
+  { id: 'Dr. Quinn',       disliked: [15, 16] }, // 16
+  { id: 'Dr. Reynolds',    disliked: [8]      }, // 17
 ];
 
-// ── 21 Mata Kuliah ───────────────────────────────────────────────────────────
+// ── 21 Courses ──────────────────────────────────────────────────────────────
 const COURSES: CourseDef[] = [
-  // pkg TI-3 ─────────────────────────────────────────────────────────────────
-  { id:'AlStr',    name:'Algoritma & Struktur Data',      spw:2, students:35, fac:[],           pkg:'TI-3' }, //  0
-  { id:'JarKom',   name:'Jaringan Komputer',              spw:2, students:32, fac:[],           pkg:'TI-3' }, //  1
-  { id:'BasDat',   name:'Basis Data',                     spw:2, students:28, fac:['computer'], pkg:'TI-3' }, //  2
-  { id:'MatDis',   name:'Matematika Diskrit',             spw:1, students:35, fac:[],           pkg:'TI-3' }, //  3
-  { id:'PemWeb',   name:'Pemrograman Web',                spw:2, students:25, fac:['computer'], pkg:'TI-3' }, //  4
-  // pkg TI-5 ─────────────────────────────────────────────────────────────────
-  { id:'KecBut',   name:'Kecerdasan Buatan',              spw:2, students:28, fac:['computer'], pkg:'TI-5' }, //  5
+  // pkg TI-3 (Computer Engineering / Information Technology, year 3) ─────────
+  { id:'AlStr',    name:'Algorithms & Data Structures',   spw:2, students:35, fac:[],           pkg:'TI-3' }, //  0
+  { id:'JarKom',   name:'Computer Networks',              spw:2, students:32, fac:[],           pkg:'TI-3' }, //  1
+  { id:'BasDat',   name:'Databases',                      spw:2, students:28, fac:['computer'], pkg:'TI-3' }, //  2
+  { id:'MatDis',   name:'Discrete Mathematics',           spw:1, students:35, fac:[],           pkg:'TI-3' }, //  3
+  { id:'PemWeb',   name:'Web Programming',                spw:2, students:25, fac:['computer'], pkg:'TI-3' }, //  4
+  // pkg TI-5 (Computer Engineering / Information Technology, year 5) ─────────
+  { id:'KecBut',   name:'Artificial Intelligence',        spw:2, students:28, fac:['computer'], pkg:'TI-5' }, //  5
   { id:'SoftEng',  name:'Software Engineering',           spw:2, students:35, fac:[],           pkg:'TI-5' }, //  6
-  { id:'RisOps',   name:'Riset Operasi',                  spw:2, students:28, fac:[],           pkg:'TI-5' }, //  7
-  { id:'KemKom',   name:'Keamanan Komputer',              spw:1, students:30, fac:[],           pkg:'TI-5' }, //  8
-  // pkg SI-3 ─────────────────────────────────────────────────────────────────
-  { id:'AnasSis',  name:'Analisis & Desain Sistem',       spw:2, students:35, fac:[],           pkg:'SI-3' }, //  9
-  { id:'ManPro',   name:'Manajemen Proyek TI',            spw:2, students:32, fac:[],           pkg:'SI-3' }, // 10
-  { id:'StatBis',  name:'Statistika Bisnis',              spw:2, students:30, fac:[],           pkg:'SI-3' }, // 11
-  { id:'BasDatSI', name:'Basis Data Sistem Informasi',    spw:2, students:25, fac:['computer'], pkg:'SI-3' }, // 12
-  // pkg SI-5 ─────────────────────────────────────────────────────────────────
+  { id:'RisOps',   name:'Operations Research',            spw:2, students:28, fac:[],           pkg:'TI-5' }, //  7
+  { id:'KemKom',   name:'Computer Security',              spw:1, students:30, fac:[],           pkg:'TI-5' }, //  8
+  // pkg SI-3 (Information Systems, year 3) ───────────────────────────────────
+  { id:'AnasSis',  name:'Systems Analysis & Design',      spw:2, students:35, fac:[],           pkg:'SI-3' }, //  9
+  { id:'ManPro',   name:'IT Project Management',          spw:2, students:32, fac:[],           pkg:'SI-3' }, // 10
+  { id:'StatBis',  name:'Business Statistics',            spw:2, students:30, fac:[],           pkg:'SI-3' }, // 11
+  { id:'BasDatSI', name:'Information Systems Databases',  spw:2, students:25, fac:['computer'], pkg:'SI-3' }, // 12
+  // pkg SI-5 (Information Systems, year 5) ───────────────────────────────────
   { id:'ERP',      name:'Enterprise Resource Planning',   spw:2, students:22, fac:['computer'], pkg:'SI-5' }, // 13
   { id:'DataWH',   name:'Data Warehouse',                 spw:2, students:22, fac:['computer'], pkg:'SI-5' }, // 14
   { id:'BusInt',   name:'Business Intelligence',          spw:2, students:20, fac:['computer'], pkg:'SI-5' }, // 15
-  { id:'ManPeng',  name:'Manajemen Pengetahuan',          spw:1, students:25, fac:[],           pkg:'SI-5' }, // 16
-  // pkg DS-1 ─────────────────────────────────────────────────────────────────
-  { id:'PengDS',   name:'Pengantar Data Science',         spw:2, students:30, fac:['computer'], pkg:'DS-1' }, // 17
-  { id:'StatInf',  name:'Statistik Inferensi',            spw:2, students:25, fac:[],           pkg:'DS-1' }, // 18
-  // pkg DS-3 ─────────────────────────────────────────────────────────────────
-  { id:'MLDas',    name:'Machine Learning Dasar',         spw:2, students:25, fac:['computer'], pkg:'DS-3' }, // 19
-  { id:'VizData',  name:'Visualisasi Data',               spw:1, students:22, fac:['computer'], pkg:'DS-3' }, // 20
+  { id:'ManPeng',  name:'Knowledge Management',           spw:1, students:25, fac:[],           pkg:'SI-5' }, // 16
+  // pkg DS-1 (Data Science, year 1) ──────────────────────────────────────────
+  { id:'PengDS',   name:'Introduction to Data Science',   spw:2, students:30, fac:['computer'], pkg:'DS-1' }, // 17
+  { id:'StatInf',  name:'Inferential Statistics',         spw:2, students:25, fac:[],           pkg:'DS-1' }, // 18
+  // pkg DS-3 (Data Science, year 3) ──────────────────────────────────────────
+  { id:'MLDas',    name:'Introduction to Machine Learning',spw:2, students:25, fac:['computer'], pkg:'DS-3' }, // 19
+  { id:'VizData',  name:'Data Visualization',             spw:1, students:22, fac:['computer'], pkg:'DS-3' }, // 20
 ];
 
-// ── 50 Kelas ─────────────────────────────────────────────────────────────────
+// ── 50 Sections ──────────────────────────────────────────────────────────────
 const SECTIONS: SectionDef[] = [
-  // ── TI-3 (13 kelas) ───────────────────────────────────────────────────────
+  // ── TI-3 (13 sections) ────────────────────────────────────────────────────
   { id:'AlStr-A',    courseIdx: 0, lecturers:[ 0, 1] },
   { id:'AlStr-B',    courseIdx: 0, lecturers:[ 2, 3] },
   { id:'AlStr-C',    courseIdx: 0, lecturers:[ 0, 2] },
@@ -141,7 +141,7 @@ const SECTIONS: SectionDef[] = [
   { id:'MatDis-B',   courseIdx: 3, lecturers:[ 2,13] },
   { id:'PemWeb-A',   courseIdx: 4, lecturers:[10,14] },
   { id:'PemWeb-B',   courseIdx: 4, lecturers:[11,15] },
-  // ── TI-5 (10 kelas) ───────────────────────────────────────────────────────
+  // ── TI-5 (10 sections) ────────────────────────────────────────────────────
   { id:'KecBut-A',   courseIdx: 5, lecturers:[16,17] },
   { id:'KecBut-B',   courseIdx: 5, lecturers:[ 0,16] },
   { id:'KecBut-C',   courseIdx: 5, lecturers:[12,17] },
@@ -152,7 +152,7 @@ const SECTIONS: SectionDef[] = [
   { id:'RisOps-B',   courseIdx: 7, lecturers:[ 9,14] },
   { id:'KemKom-A',   courseIdx: 8, lecturers:[15,16] },
   { id:'KemKom-B',   courseIdx: 8, lecturers:[ 1,17] },
-  // ── SI-3 (9 kelas) ────────────────────────────────────────────────────────
+  // ── SI-3 (9 sections) ─────────────────────────────────────────────────────
   { id:'AnasSis-A',  courseIdx: 9, lecturers:[ 2, 4] },
   { id:'AnasSis-B',  courseIdx: 9, lecturers:[ 5, 7] },
   { id:'AnasSis-C',  courseIdx: 9, lecturers:[ 2, 6] },
@@ -162,7 +162,7 @@ const SECTIONS: SectionDef[] = [
   { id:'StatBis-B',  courseIdx:11, lecturers:[ 8,16] },
   { id:'BasDatSI-A', courseIdx:12, lecturers:[ 9,17] },
   { id:'BasDatSI-B', courseIdx:12, lecturers:[12, 0] },
-  // ── SI-5 (8 kelas) ────────────────────────────────────────────────────────
+  // ── SI-5 (8 sections) ─────────────────────────────────────────────────────
   { id:'ERP-A',      courseIdx:13, lecturers:[ 1, 3] },
   { id:'ERP-B',      courseIdx:13, lecturers:[ 6,13] },
   { id:'DataWH-A',   courseIdx:14, lecturers:[ 2,14] },
@@ -171,14 +171,14 @@ const SECTIONS: SectionDef[] = [
   { id:'BusInt-B',   courseIdx:15, lecturers:[ 7,16] },
   { id:'ManPeng-A',  courseIdx:16, lecturers:[ 8,12] },
   { id:'ManPeng-B',  courseIdx:16, lecturers:[ 0,17] },
-  // ── DS-1 (6 kelas) ────────────────────────────────────────────────────────
+  // ── DS-1 (6 sections) ─────────────────────────────────────────────────────
   { id:'PengDS-A',   courseIdx:17, lecturers:[ 9,13] },
   { id:'PengDS-B',   courseIdx:17, lecturers:[10,14] },
   { id:'PengDS-C',   courseIdx:17, lecturers:[11,15] },
   { id:'StatInf-A',  courseIdx:18, lecturers:[ 3,16] },
   { id:'StatInf-B',  courseIdx:18, lecturers:[ 4,17] },
   { id:'StatInf-C',  courseIdx:18, lecturers:[12, 0] },
-  // ── DS-3 (4 kelas) ────────────────────────────────────────────────────────
+  // ── DS-3 (4 sections) ─────────────────────────────────────────────────────
   { id:'MLDas-A',    courseIdx:19, lecturers:[ 1, 6] },
   { id:'MLDas-B',    courseIdx:19, lecturers:[ 7,13] },
   { id:'VizData-A',  courseIdx:20, lecturers:[ 5,14] },
@@ -570,9 +570,9 @@ function printGrid(label: string, sol: DecodedSolution): void {
 
   const W = 72;
   console.log(`\n${'═'.repeat(W)}`);
-  console.log(` JADWAL PERKULIAHAN — ${label}`);
+  console.log(` COURSE TIMETABLE — ${label}`);
   console.log(`${'═'.repeat(W)}`);
-  console.log(` ${S} kelas | ${totalSess} sesi total | Pelanggaran preferensi dosen: ${prefViol}`);
+  console.log(` ${S} sections | ${totalSess} total sessions | Lecturer preference violations: ${prefViol}`);
 
   for (let d = 0; d < DAYS; d++) {
     // Collect all (hour → items) for this day
@@ -620,7 +620,7 @@ function printGrid(label: string, sol: DecodedSolution): void {
 function printDiff(before: DecodedSolution, after: DecodedSolution): void {
   const W = 72;
   console.log(`\n${'═'.repeat(W)}`);
-  console.log(' PERUBAHAN JADWAL (sebelum → sesudah perturbasi)');
+  console.log(' SCHEDULE CHANGES (before → after perturbation)');
   console.log(`${'═'.repeat(W)}`);
 
   let movedCount = 0, roomChanged = 0, unchanged = 0;
@@ -634,11 +634,11 @@ function printDiff(before: DecodedSolution, after: DecodedSolution): void {
       const secId = SECTIONS[s].id.padEnd(12);
 
       if (pB !== pA) {
-        console.log(`  PINDAH WAKTU  ${secId} Sesi${k+1}: ${fmtPeriod(pB).padEnd(16)} → ${fmtPeriod(pA)}` +
+        console.log(`  TIME MOVED   ${secId} Session${k+1}: ${fmtPeriod(pB).padEnd(16)} → ${fmtPeriod(pA)}` +
           (rB !== rA ? `  [${ROOMS[rB].id} → ${ROOMS[rA].id}]` : ''));
         movedCount++;
       } else if (rB !== rA) {
-        console.log(`  GANTI RUANG   ${secId} Sesi${k+1}: ${fmtPeriod(pA).padEnd(16)}   ${ROOMS[rB].id} → ${ROOMS[rA].id}` +
+        console.log(`  ROOM CHANGED ${secId} Session${k+1}: ${fmtPeriod(pA).padEnd(16)}   ${ROOMS[rB].id} → ${ROOMS[rA].id}` +
           (lB !== lA ? `  [${LECTURERS[lB].id} → ${LECTURERS[lA].id}]` : ''));
         roomChanged++;
       } else {
@@ -649,7 +649,7 @@ function printDiff(before: DecodedSolution, after: DecodedSolution): void {
 
   console.log('─'.repeat(W));
   const total = movedCount + roomChanged + unchanged;
-  console.log(` Pindah waktu: ${movedCount}  |  Ganti ruang: ${roomChanged}  |  Tidak berubah: ${unchanged}/${total}`);
+  console.log(` Time moved: ${movedCount}  |  Room changed: ${roomChanged}  |  Unchanged: ${unchanged}/${total}`);
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -660,17 +660,17 @@ function main(): void {
   const t0 = Date.now();
 
   console.log('════════════════════════════════════════════════════════════════════════');
-  console.log(' CP-SAT Campus Timetabling — FILKOM (Skala Penuh)');
+  console.log(' CP-SAT Campus Timetabling — FILKOM (Full Scale)');
   console.log('════════════════════════════════════════════════════════════════════════');
-  console.log(` Instance: ${S} kelas | ${C} mata kuliah | ${L} dosen | ${R} ruangan | ${TOTAL_P} slot waktu`);
+  console.log(` Instance: ${S} sections | ${C} courses | ${L} lecturers | ${R} rooms | ${TOTAL_P} time slots`);
 
-  // ── FASE 1: JADWAL AWAL ──────────────────────────────────────────────────
-  console.log('\n[FASE 1] Menyusun jadwal awal...');
+  // ── PHASE 1: INITIAL SCHEDULE ────────────────────────────────────────────
+  console.log('\n[PHASE 1] Building initial schedule...');
   const validRooms1 = computeSectionValidRooms();
 
   const greedy1 = greedySolve(validRooms1);
-  if (!greedy1) { console.error('  Greedy gagal!'); return; }
-  console.log(`  Greedy selesai: ${Date.now() - t0}ms`);
+  if (!greedy1) { console.error('  Greedy failed!'); return; }
+  console.log(`  Greedy done: ${Date.now() - t0}ms`);
 
   const built1  = buildIntervalModel(validRooms1, greedy1);
   const solver1 = new CpSolver();
@@ -678,17 +678,17 @@ function main(): void {
 
   const t1     = Date.now();
   const stat1  = solver1.solve(built1.model);
-  console.log(`  CP Solver: ${CpSolverStatus[stat1]} | ${solver1.numBranches} branch | ${Date.now() - t1}ms`);
+  console.log(`  CP Solver: ${CpSolverStatus[stat1]} | ${solver1.numBranches} branches | ${Date.now() - t1}ms`);
 
   if (stat1 !== CpSolverStatus.OPTIMAL && stat1 !== CpSolverStatus.FEASIBLE) {
-    console.error('  Gagal!'); return;
+    console.error('  Failed!'); return;
   }
   const sol1 = decodeSolution(built1, solver1);
-  printGrid('JADWAL AWAL', sol1);
+  printGrid('INITIAL SCHEDULE', sol1);
 
-  // ── FASE 2: PERTURBASI ───────────────────────────────────────────────────
+  // ── PHASE 2: PERTURBATION ────────────────────────────────────────────────
   console.log('\n════════════════════════════════════════════════════════════════════════');
-  console.log(' PERTURBASI: LAB-A mengalami kerusakan hardware — tidak bisa digunakan');
+  console.log(' PERTURBATION: LAB-A has a hardware failure — unavailable for use');
   console.log('════════════════════════════════════════════════════════════════════════');
 
   const affectedSet = new Set<number>();
@@ -696,25 +696,25 @@ function main(): void {
     for (let k = 0; k < sessCount(s); k++)
       if (sol1.room[s][k] === LAB_A_IDX) affectedSet.add(s);
 
-  console.log(`\n  Kelas terdampak (menggunakan LAB-A): ${affectedSet.size} kelas`);
+  console.log(`\n  Affected sections (using LAB-A): ${affectedSet.size} sections`);
   for (const s of affectedSet) {
     const sec = SECTIONS[s];
     for (let k = 0; k < sessCount(s); k++) {
       if (sol1.room[s][k] === LAB_A_IDX)
-        console.log(`    ${sec.id.padEnd(12)} Sesi${k+1}: ${fmtPeriod(sol1.period[s][k])}, LAB-A`);
+        console.log(`    ${sec.id.padEnd(12)} Session${k+1}: ${fmtPeriod(sol1.period[s][k])}, LAB-A`);
     }
   }
 
-  // ── FASE 3: PENJADWALAN ULANG ────────────────────────────────────────────
-  console.log('\n[FASE 3] Penjadwalan ulang minimal disruption...');
+  // ── PHASE 3: RESCHEDULING ────────────────────────────────────────────────
+  console.log('\n[PHASE 3] Minimal-disruption rescheduling...');
 
   const validRooms2 = computeSectionValidRooms([LAB_A_IDX]);
 
-  // Re-greedy hanya untuk affected sections (di atas fixed base = sol1 non-affected)
+  // Re-greedy only for affected sections (on top of a fixed base = sol1 non-affected)
   const greedyR = greedyReschedulePartial(sol1, affectedSet, validRooms2);
-  if (!greedyR) { console.error('  Partial greedy gagal!'); return; }
+  if (!greedyR) { console.error('  Partial greedy failed!'); return; }
 
-  // Non-affected sections: hard-fix ke jadwal lama
+  // Non-affected sections: hard-fix to the old schedule
   const fixedSections = new Set<number>();
   for (let s = 0; s < S; s++)
     if (!affectedSet.has(s)) fixedSections.add(s);
@@ -725,10 +725,10 @@ function main(): void {
 
   const t2    = Date.now();
   const stat2 = solver2.solve(built2.model);
-  console.log(`  CP Solver: ${CpSolverStatus[stat2]} | ${solver2.numBranches} branch | ${Date.now() - t2}ms`);
+  console.log(`  CP Solver: ${CpSolverStatus[stat2]} | ${solver2.numBranches} branches | ${Date.now() - t2}ms`);
 
   if (stat2 !== CpSolverStatus.OPTIMAL && stat2 !== CpSolverStatus.FEASIBLE) {
-    console.error('  Gagal menemukan jadwal pengganti!'); return;
+    console.error('  Failed to find a replacement schedule!'); return;
   }
   const sol2 = decodeSolution(built2, solver2);
 
@@ -740,12 +740,12 @@ function main(): void {
         sol1.lect[s] === sol2.lect[s] &&
         sol1.room[s].every((r, k) => r === sol2.room[s][k])) same++;
   }
-  console.log(`  Kelas tidak terdampak yang tetap sama: ${same}/${S - affectedSet.size}`);
+  console.log(`  Non-affected sections that stayed the same: ${same}/${S - affectedSet.size}`);
 
-  printGrid('JADWAL SETELAH RESCHEDULE (LAB-A DIBLOKIR)', sol2);
+  printGrid('SCHEDULE AFTER RESCHEDULE (LAB-A BLOCKED)', sol2);
   printDiff(sol1, sol2);
 
-  console.log(`\n  Total waktu keseluruhan: ${Date.now() - t0}ms`);
+  console.log(`\n  Total overall time: ${Date.now() - t0}ms`);
 }
 
 main();

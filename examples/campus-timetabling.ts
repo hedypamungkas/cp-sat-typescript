@@ -3,7 +3,7 @@
  * ===========================================================================
  *
  * Problem (curriculum-based course timetabling, CB-CTT style):
- *   Assign, for every SECTION (kelas) of a course: a lecturer, a room, and one
+ *   Assign, for every SECTION of a course: a lecturer, a room, and one
  *   or more weekly sessions (room + period). Constraints:
  *
  *   HARD
@@ -116,23 +116,23 @@ const LECTURERS: LecturerDef[] = [
 const COURSES: CourseDef[] = [
   // --- Package S3-TI (semester 3) ---
   { id: 'Algo', sessionsPerWeek: 2, students: 35, facilities: ['projector'], pkg: 'S3-TI' },
-  { id: 'BasisData', sessionsPerWeek: 2, students: 30, facilities: ['computer'], pkg: 'S3-TI' },
-  { id: 'Matdis', sessionsPerWeek: 1, students: 30, facilities: [], pkg: 'S3-TI' },
+  { id: 'Databases', sessionsPerWeek: 2, students: 30, facilities: ['computer'], pkg: 'S3-TI' },
+  { id: 'DiscMath', sessionsPerWeek: 1, students: 30, facilities: [], pkg: 'S3-TI' },
   // --- Package S5-TI (semester 5) ---
   { id: 'AI', sessionsPerWeek: 2, students: 28, facilities: ['computer'], pkg: 'S5-TI' },
   { id: 'SoftEng', sessionsPerWeek: 1, students: 50, facilities: ['projector'], pkg: 'S5-TI' },
-  { id: 'RisetOps', sessionsPerWeek: 2, students: 35, facilities: ['projector'], pkg: 'S5-TI' },
+  { id: 'OpsRes', sessionsPerWeek: 2, students: 35, facilities: ['projector'], pkg: 'S5-TI' },
 ];
 
 // Sections. Note "Algo" has TWO parallel sections (different students/lecturers).
 const SECTIONS: SectionDef[] = [
   { id: 'Algo-A', courseIdx: 0, eligibleLecturerIdx: [0, 2] }, // L1, L3
   { id: 'Algo-B', courseIdx: 0, eligibleLecturerIdx: [1] }, // L2 (parallel section)
-  { id: 'BasisData-A', courseIdx: 1, eligibleLecturerIdx: [3, 4] }, // L4, L5
-  { id: 'Matdis-A', courseIdx: 2, eligibleLecturerIdx: [0, 5] }, // L1, L6
+  { id: 'Databases-A', courseIdx: 1, eligibleLecturerIdx: [3, 4] }, // L4, L5
+  { id: 'DiscMath-A', courseIdx: 2, eligibleLecturerIdx: [0, 5] }, // L1, L6
   { id: 'AI-A', courseIdx: 3, eligibleLecturerIdx: [1, 4] }, // L2, L5
   { id: 'SoftEng-A', courseIdx: 4, eligibleLecturerIdx: [2, 3] }, // L3, L4
-  { id: 'RisetOps-A', courseIdx: 5, eligibleLecturerIdx: [5] }, // L6
+  { id: 'OpsRes-A', courseIdx: 5, eligibleLecturerIdx: [5] }, // L6
 ];
 
 // Derived helpers
