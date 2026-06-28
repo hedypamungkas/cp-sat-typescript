@@ -1254,12 +1254,11 @@ export class CpModel {
   // ============================================================================
 
   /**
-   * Clone the model
-   *
-   * @throws Error — not yet implemented
+   * Clone the model via JSON round-trip (deep copy preserving variable indices).
+   * Used for portfolio parallelism (one independent model copy per worker).
    */
   clone(): CpModel {
-    throw new Error('Clone not yet implemented');
+    return CpModel.fromJSON(this.toJSON());
   }
 
   /**

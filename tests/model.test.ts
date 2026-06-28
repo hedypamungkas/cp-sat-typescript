@@ -5,8 +5,9 @@
 
 import { describe, it, expect } from 'vitest';
 import { CpModel } from '../src/model';
+import { CpSolver } from '../src/solver';
 import { IntVarImpl, BoolVarImpl } from '../src/variables';
-import { Domain, LinearExpr, VariableSelectionStrategy, DomainReductionStrategy } from '../src/types';
+import { CpSolverStatus, Domain, LinearExpr, VariableSelectionStrategy, DomainReductionStrategy } from '../src/types';
 
 describe('CpModel', () => {
   describe('constructor', () => {
@@ -495,9 +496,23 @@ describe('CpModel', () => {
   });
 
   describe('clone', () => {
-    it('should throw not implemented', () => {
+    it('produces an independent deep copy (JSON round-trip) that solves identically', () => {
       const model = new CpModel();
-      expect(() => model.clone()).toThrow('not yet implemented');
+      const x = model.newIntVar(0, 5, 'x');
+      const y = model.newIntVar(0, 5, 'y');
+      model.addAllDifferent([x, y]);
+      model.maximize(x.add(y));
+
+      const copy = model.clone();
+      expect(copy).not.toBe(model);
+      // The clone solves to the same optimum (x+y = 9 with allDifferent) with the same variable indices.
+      const solver = new CpSolver();
+      const status = solver.solve(copy);
+      expect(status).toBe(CpSolverStatus.OPTIMAL);
+      const xv = solver.value(copy.registry.allIntVars[0]);
+      const yv = solver.value(copy.registry.allIntVars[1]);
+      expect(xv + yv).toBe(9); // 5+4
+      expect(xv).not.toBe(yv);
     });
   });
 

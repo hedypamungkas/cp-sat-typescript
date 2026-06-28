@@ -792,9 +792,11 @@ export interface SolverParameters {
   /** Enumerate all solutions */
   enumerateAllSolutions?: boolean;
   /**
-   * Number of workers (threads). Currently a NO-OP: this solver is
-   * single-threaded, so any value is silently ignored. Kept on the interface
-   * for source compatibility with OR-Tools-style call sites.
+   * Number of workers (threads). A NO-OP on the synchronous `solve()` path
+   * (which is single-threaded and blocks the calling thread). For actual
+   * parallelism, use the async `solvePortfolio()` from the `cp-sat-ts/worker`
+   * subpath, which fans out N Web Workers / worker_threads with diversified
+   * strategies. Kept here for source compatibility with OR-Tools-style call sites.
    */
   numWorkers?: number;
   /** Log search progress */

@@ -7,6 +7,10 @@ dist/
 # Timetabling example output (generated jadwal CSV)
 output/
 
+# Browser Vite example
+examples/browser-vite/node_modules/
+examples/browser-vite/dist/
+
 # IDE
 .idea/
 .vscode/

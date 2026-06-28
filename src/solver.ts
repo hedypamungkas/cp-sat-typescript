@@ -168,9 +168,9 @@ export class CpSolver {
       }
     }
 
-    // Extract best objective bound from engine
+    // Extract best objective bound (dual) from engine
     if (model.objective) {
-      const engineBound = this._engine.bestObjective;
+      const engineBound = this._engine.bestObjectiveBound;
       if (engineBound !== null) {
         this._bestObjectiveBound = engineBound;
       }

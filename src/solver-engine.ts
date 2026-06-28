@@ -153,6 +153,11 @@ export class SolverEngine {
 
   // Branch-and-bound state
   private _bestObjective: number | null = null;
+  // Dual bound (root relaxation). Sound: for maximize it is an upper bound on the
+  // optimum (≥ optimum); for minimize a lower bound (≤ optimum). Set to the primal
+  // incumbent when OPTIMAL is proven (dual == primal == optimum). Static root bound —
+  // does not tighten mid-search (no open-frontier structure); see bestObjectiveBound().
+  private _rootDualBound: number | null = null;
   private _hasObjective: boolean = false;
   private _isMaximize: boolean = false;
   private _objectiveExpr: LinearExpr | null = null;
@@ -374,6 +379,12 @@ export class SolverEngine {
         return CpSolverStatus.INFEASIBLE;
       }
       this._solution = this._extractSolution(presolveResult.domains);
+      // Presolve proved optimality → primal == dual == the objective value.
+      if (this._hasObjective) {
+        const objValue = this._computeObjective(presolveResult.domains);
+        this._bestObjective = objValue;
+        this._rootDualBound = objValue;
+      }
       this._stats.wallTime = (Date.now() - this._startTime) / 1000;
       return CpSolverStatus.OPTIMAL;
     }
@@ -425,6 +436,13 @@ export class SolverEngine {
       this._boundLitReg = null;
     }
 
+    // Root relaxation dual bound (sound: ≥ optimum for maximize, ≤ for minimize).
+    // Computed once on the post-presolve domains. LP-engaging when enabled.
+    if (this._hasObjective) {
+      const rb = this._computeObjectiveBound(presolveResult.domains, true);
+      this._rootDualBound = rb ? (this._isMaximize ? rb.max : rb.min) : null;
+    }
+
     // Start search (with optional restarts and LNS)
     const searchStart = Date.now();
     let status: CpSolverStatus;
@@ -444,23 +462,29 @@ export class SolverEngine {
     this._stats.wallTime = (Date.now() - this._startTime) / 1000;
 
     // Determine final status
+    let finalStatus: CpSolverStatus;
     if (this._solution) {
       if (this._hasObjective) {
         // If we have an objective and exhausted search → OPTIMAL
         // If we have an objective but search was cut short → FEASIBLE
-        return this._searchExhausted ? CpSolverStatus.OPTIMAL : CpSolverStatus.FEASIBLE;
+        finalStatus = this._searchExhausted ? CpSolverStatus.OPTIMAL : CpSolverStatus.FEASIBLE;
+      } else {
+        // Pure feasibility: finding any solution = OPTIMAL
+        finalStatus = CpSolverStatus.OPTIMAL;
       }
-      // Pure feasibility: finding any solution = OPTIMAL
-      return CpSolverStatus.OPTIMAL;
-    }
-
-    // No solution found
-    if (status === CpSolverStatus.INFEASIBLE) {
+    } else if (status === CpSolverStatus.INFEASIBLE) {
+      // No solution found
       if (this._model.assumptions.length > 0) this._infeasibleAfterAssumptions = true;
-      return CpSolverStatus.INFEASIBLE;
+      finalStatus = CpSolverStatus.INFEASIBLE;
+    } else {
+      finalStatus = status;
     }
 
-    return status;
+    // On a proven OPTIMAL, dual == primal (gap 0).
+    if (finalStatus === CpSolverStatus.OPTIMAL && this._bestObjective !== null) {
+      this._rootDualBound = this._bestObjective;
+    }
+    return finalStatus;
   }
 
   /**
@@ -3554,6 +3578,17 @@ export class SolverEngine {
    */
   get bestObjective(): number | null {
     return this._bestObjective;
+  }
+
+  /**
+   * The dual (objective) bound: a sound bound on the optimum.
+   * For maximize this is an upper bound (≥ optimum); for minimize a lower bound (≤ optimum).
+   * Equals the primal incumbent when OPTIMAL is proven (gap 0). Otherwise the root
+   * relaxation bound — tight with LP enabled, looser without; static (does not tighten
+   * mid-search). Combined with bestObjective this gives the optimality gap.
+   */
+  get bestObjectiveBound(): number | null {
+    return this._rootDualBound;
   }
 
   /**

@@ -1,0 +1,17 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>CP-SAT Portfolio Solver — Browser Demo</title>
+</head>
+<body>
+  <h1>CP-SAT Portfolio Solver — Browser Demo</h1>
+  <p>Portfolio parallelism via Web Workers. No SharedArrayBuffer, no WASM.</p>
+  <div style="margin-bottom: 1rem;">
+    <button id="portfolio">Solve (4-worker portfolio)</button>
+    <button id="single">Solve (single worker)</button>
+  </div>
+  <pre id="output" style="background:#f4f4f4; padding:1rem; border-radius:4px; font-size:14px;"></pre>
+  <script type="module" src="/src/main.ts"></script>
+</body>
+</html>
